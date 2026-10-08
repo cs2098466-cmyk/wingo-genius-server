@@ -2,12 +2,11 @@
    WINGO GENIUS SERVER
    24 घंटे चलता है
    8 engines (30S के 4, 1M के 4)
-   wreq-js के साथ — Chrome TLS Fingerprint
 ============================================================ */
 
 const express = require('express');
-// नया import: wreq-js से fetch (Chrome की तरह TLS handshake करता है)
-const { fetch } = require('wreq-js');
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+
 const db = require('./database');
 const eng = require('./engines');
 
@@ -43,26 +42,29 @@ const state = {
 };
 
 /* ============================================================
-   Fetch API data — wreq-js के साथ (Chrome impersonation)
+   Fetch API data — direct WinGo API call
 ============================================================ */
 async function fetchAPI(apiUrl) {
   const targetUrl = apiUrl + '?ts=' + Date.now();
 
   try {
-    const res = await fetch(targetUrl, {
-      // Chrome का असली TLS और HTTP/2 fingerprint भेजें
-      browser: 'chrome_142', 
-      os: 'windows',
+    const r = await fetch(targetUrl, {
+      method: 'GET',
+      cache: 'no-store',
       headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
         'Referer': 'https://draw.ar-lottery01.com/'
       }
     });
 
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
 
-    const j = await res.json();
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error('bad JSON'); }
+
     if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
 
     const list = j.data.list.map(x => ({
@@ -93,12 +95,10 @@ async function processTimeframe(tf) {
 
   if (state[tf].lastPeriod === latestPeriod) return;
 
-  /* Update history */
   const chrono = list.slice(0, 100).reverse();
   const numbers = chrono.map(x => x.number);
   state[tf].number.history = numbers;
 
-  /* Resolve previous prediction for each engine */
   for (const engineType of ['number', 'colour', 'bigsmall']) {
     const engineKey = `${tf}_${engineType}`;
     const lastPred = state[tf][engineType].status;
@@ -120,10 +120,7 @@ async function processTimeframe(tf) {
       const newRounds = (oldStatus.rounds || 0) + 1;
 
       await db.updateEngineStatus(engineKey, {
-        streak: newStreak,
-        wins: newWins,
-        losses: newLosses,
-        rounds: newRounds,
+        streak: newStreak, wins: newWins, losses: newLosses, rounds: newRounds,
         last_prediction: lastPred.prediction,
         last_confidence: lastPred.confidence,
         last_period: lastPred.period
@@ -137,7 +134,6 @@ async function processTimeframe(tf) {
     }
   }
 
-  /* Learn patterns */
   const existingPatterns = await db.loadAllPatterns(`${tf}_number`);
   const newPatterns = eng.learnPatterns(`${tf}`, numbers, existingPatterns);
 
@@ -151,7 +147,6 @@ async function processTimeframe(tf) {
   state[tf].colour.patterns = newPatterns;
   state[tf].bigsmall.patterns = newPatterns;
 
-  /* Next prediction */
   const nextPeriod = (BigInt(latestPeriod) + 1n).toString();
   const context = eng.makeContext(numbers);
 
@@ -173,7 +168,6 @@ async function processTimeframe(tf) {
     await db.savePrediction(`${tf}_bigsmall`, nextPeriod, bPred.prediction, bPred.confidence);
   }
 
-  /* Combined readiness */
   const s1 = await db.getEngineStatus(`${tf}_number`) || { streak: 0 };
   const s2 = await db.getEngineStatus(`${tf}_colour`) || { streak: 0 };
   const s3 = await db.getEngineStatus(`${tf}_bigsmall`) || { streak: 0 };
@@ -184,15 +178,10 @@ async function processTimeframe(tf) {
   state[tf].combined = allAt100;
   await db.updateCombinedState(tf, allAt100);
 
-  if (allAt100 && !prevCombined) {
-    console.log(`[${tf}] COMBINED ACTIVE`);
-  } else if (!allAt100 && prevCombined) {
-    console.log(`[${tf}] COMBINED OFF`);
-  }
+  if (allAt100 && !prevCombined) console.log(`[${tf}] COMBINED ACTIVE`);
+  else if (!allAt100 && prevCombined) console.log(`[${tf}] COMBINED OFF`);
 
-  /* JACKPOT */
-  if (allAt100 && state[tf].combinedPrev &&
-      state[tf].combinedPrev.period === latestPeriod) {
+  if (allAt100 && state[tf].combinedPrev && state[tf].combinedPrev.period === latestPeriod) {
     const actualSize = eng.sizeOf(latestNumber);
     const actualColour = eng.colourOf(latestNumber);
     const actualNum = String(latestNumber);
@@ -224,20 +213,68 @@ async function processTimeframe(tf) {
 }
 
 /* ============================================================
-   Main loop — हर 30 सेकंड
+   Main loop
 ============================================================ */
 async function mainLoop() {
-  try {
-    await processTimeframe('30s');
-  } catch (e) { console.error('[30s ERROR]', e.message); }
-
-  try {
-    await processTimeframe('1m');
-  } catch (e) { console.error('[1m ERROR]', e.message); }
+  try { await processTimeframe('30s'); } catch (e) { console.error('[30s ERROR]', e.message); }
+  try { await processTimeframe('1m'); } catch (e) { console.error('[1m ERROR]', e.message); }
 }
 
 /* ============================================================
-   API endpoints — dashboard के लिए
+   Diagnostic route — WinGo API test करने के लिए
+============================================================ */
+app.get('/diagnostic', async (req, res) => {
+  const out = {};
+
+  /* 1. Server का response */
+  out.server = {
+    status: 'ok',
+    uptime: process.uptime(),
+    time: new Date().toISOString()
+  };
+
+  /* 2. Outbound IP */
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const j = await r.json();
+    out.outbound_ip = j.ip;
+  } catch (e) {
+    out.outbound_ip = 'error: ' + e.message;
+  }
+
+  /* 3. WinGo API test */
+  try {
+    const testUrl = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
+    const r = await fetch(testUrl, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://draw.ar-lottery01.com/'
+      }
+    });
+    out.wingo_test = {
+      status: r.status,
+      statusText: r.statusText,
+      ok: r.ok,
+      headers: {
+        'content-type': r.headers.get('content-type'),
+        'server': r.headers.get('server'),
+        'cf-ray': r.headers.get('cf-ray')
+      }
+    };
+    const text = await r.text();
+    out.wingo_test.body_preview = text.slice(0, 300);
+  } catch (e) {
+    out.wingo_test = { error: e.message };
+  }
+
+  res.json(out);
+});
+
+/* ============================================================
+   Endpoints
 ============================================================ */
 app.get('/', (req, res) => {
   res.json({
@@ -251,10 +288,8 @@ app.get('/', (req, res) => {
 app.get('/api/status', async (req, res) => {
   try {
     const result = {};
-
     for (const tf of ['30s', '1m']) {
       result[tf] = {};
-
       for (const et of ['number', 'colour', 'bigsmall']) {
         const key = `${tf}_${et}`;
         const status = await db.getEngineStatus(key) || {};
@@ -279,7 +314,6 @@ app.get('/api/status', async (req, res) => {
           }))
         };
       }
-
       const cs = await db.getCombinedState(tf) || {};
       result[tf].combined = {
         active: cs.active || false,
@@ -293,7 +327,6 @@ app.get('/api/status', async (req, res) => {
         }))
       };
     }
-
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -307,10 +340,8 @@ async function start() {
   console.log('[SERVER] Starting...');
   await db.initDB();
   console.log('[SERVER] DB ready');
-
   await mainLoop();
   setInterval(mainLoop, 30 * 1000);
-
   app.listen(PORT, () => {
     console.log(`[SERVER] Listening on port ${PORT}`);
   });
