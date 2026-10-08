@@ -21,14 +21,13 @@ const API_30S = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePa
 const API_1M = 'https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json';
 
 /* ============================================================
-   Proxies — Cloudflare block से बचने के लिए
+   Cloudflare Worker — proxy
 ============================================================ */
-const PROXIES = [
-  { name: 'allorigins-raw', build: (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u) },
-  { name: 'allorigins-get', build: (u) => 'https://api.allorigins.win/get?url=' + encodeURIComponent(u), wrap: true },
-  { name: 'corsproxy', build: (u) => 'https://corsproxy.io/?url=' + encodeURIComponent(u) },
-  { name: 'direct', build: (u) => u }
-];
+const WORKER_BASE = 'https://shrill-poetry-1f4a.cs2098466.workers.dev/';
+
+function buildProxyUrl(targetUrl) {
+  return WORKER_BASE + '?url=' + encodeURIComponent(targetUrl);
+}
 
 /* ============================================================
    State — in memory
@@ -53,48 +52,40 @@ const state = {
 };
 
 /* ============================================================
-   Fetch API data — proxy chain के साथ
+   Fetch API data — Cloudflare Worker के through
 ============================================================ */
 async function fetchAPI(apiUrl) {
-  const url = apiUrl + '?ts=' + Date.now();
-  let lastErr = null;
+  const targetUrl = apiUrl + '?ts=' + Date.now();
+  const proxyUrl = buildProxyUrl(targetUrl);
 
-  for (const proxy of PROXIES) {
-    try {
-      const proxyUrl = proxy.build(url);
-      const r = await fetch(proxyUrl, {
-        cache: 'no-store',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json,text/plain,*/*',
-          'Accept-Language': 'en-US,en;q=0.9'
-        }
-      });
-      if (!r.ok) throw new Error(proxy.name + ' HTTP ' + r.status);
-      const text = await r.text();
-      let j;
-      try { j = JSON.parse(text); } catch (e) { throw new Error(proxy.name + ' bad JSON'); }
-      if (proxy.wrap && j && j.contents) {
-        try { j = JSON.parse(j.contents); } catch (e) { throw new Error(proxy.name + ' bad wrapped JSON'); }
+  try {
+    const r = await fetch(proxyUrl, {
+      cache: 'no-store',
+      headers: {
+        'Accept': 'application/json,text/plain,*/*'
       }
-      if (!j || !j.data || !j.data.list) throw new Error(proxy.name + ' wrong shape');
+    });
 
-      const list = j.data.list.map(x => ({
-        period: String(x.issueNumber),
-        number: parseInt(x.number, 10)
-      })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
-        .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
+    if (!r.ok) throw new Error('Worker HTTP ' + r.status);
 
-      console.log(`[API] ${proxy.name} OK · ${list.length} periods`);
-      return list;
-    } catch (e) {
-      lastErr = e;
-      console.log(`[API] ${proxy.name} failed: ${e.message}`);
-    }
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error('bad JSON'); }
+
+    if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
+
+    const list = j.data.list.map(x => ({
+      period: String(x.issueNumber),
+      number: parseInt(x.number, 10)
+    })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
+      .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
+
+    console.log(`[API] OK · ${list.length} periods`);
+    return list;
+  } catch (e) {
+    console.error('[API ERROR]', e.message);
+    return [];
   }
-
-  console.error('[API ERROR] all proxies failed:', lastErr ? lastErr.message : 'unknown');
-  return [];
 }
 
 /* ============================================================
