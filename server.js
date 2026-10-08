@@ -21,6 +21,16 @@ const API_30S = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePa
 const API_1M = 'https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json';
 
 /* ============================================================
+   Proxies — Cloudflare block से बचने के लिए
+============================================================ */
+const PROXIES = [
+  { name: 'allorigins-raw', build: (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u) },
+  { name: 'allorigins-get', build: (u) => 'https://api.allorigins.win/get?url=' + encodeURIComponent(u), wrap: true },
+  { name: 'corsproxy', build: (u) => 'https://corsproxy.io/?url=' + encodeURIComponent(u) },
+  { name: 'direct', build: (u) => u }
+];
+
+/* ============================================================
    State — in memory
 ============================================================ */
 const state = {
@@ -29,35 +39,62 @@ const state = {
     colour:   { patterns: [], history: [], status: null },
     bigsmall: { patterns: [], history: [], status: null },
     lastPeriod: null,
-    combined: false
+    combined: false,
+    combinedPrev: null
   },
   '1m': {
     number:   { patterns: [], history: [], status: null },
     colour:   { patterns: [], history: [], status: null },
     bigsmall: { patterns: [], history: [], status: null },
     lastPeriod: null,
-    combined: false
+    combined: false,
+    combinedPrev: null
   }
 };
 
 /* ============================================================
-   Fetch API data
+   Fetch API data — proxy chain के साथ
 ============================================================ */
-async function fetchAPI(url) {
-  try {
-    const r = await fetch(url + '?ts=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const j = await r.json();
-    const list = (j && j.data && j.data.list) ? j.data.list : [];
-    return list.map(x => ({
-      period: String(x.issueNumber),
-      number: parseInt(x.number, 10)
-    })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
-      .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
-  } catch (e) {
-    console.error('[API ERROR]', e.message);
-    return [];
+async function fetchAPI(apiUrl) {
+  const url = apiUrl + '?ts=' + Date.now();
+  let lastErr = null;
+
+  for (const proxy of PROXIES) {
+    try {
+      const proxyUrl = proxy.build(url);
+      const r = await fetch(proxyUrl, {
+        cache: 'no-store',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json,text/plain,*/*',
+          'Accept-Language': 'en-US,en;q=0.9'
+        }
+      });
+      if (!r.ok) throw new Error(proxy.name + ' HTTP ' + r.status);
+      const text = await r.text();
+      let j;
+      try { j = JSON.parse(text); } catch (e) { throw new Error(proxy.name + ' bad JSON'); }
+      if (proxy.wrap && j && j.contents) {
+        try { j = JSON.parse(j.contents); } catch (e) { throw new Error(proxy.name + ' bad wrapped JSON'); }
+      }
+      if (!j || !j.data || !j.data.list) throw new Error(proxy.name + ' wrong shape');
+
+      const list = j.data.list.map(x => ({
+        period: String(x.issueNumber),
+        number: parseInt(x.number, 10)
+      })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
+        .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
+
+      console.log(`[API] ${proxy.name} OK · ${list.length} periods`);
+      return list;
+    } catch (e) {
+      lastErr = e;
+      console.log(`[API] ${proxy.name} failed: ${e.message}`);
+    }
   }
+
+  console.error('[API ERROR] all proxies failed:', lastErr ? lastErr.message : 'unknown');
+  return [];
 }
 
 /* ============================================================
@@ -85,7 +122,6 @@ async function processTimeframe(tf) {
     const lastPred = state[tf][engineType].status;
 
     if (lastPred && lastPred.period === latestPeriod) {
-      /* Resolve */
       const actualSize = eng.sizeOf(latestNumber);
       const actualColour = eng.colourOf(latestNumber);
       const actualNumber = String(latestNumber);
@@ -111,7 +147,7 @@ async function processTimeframe(tf) {
         last_period: lastPred.period
       });
 
-      await db.resolvePrediction(engineKey, lastPred.period, 
+      await db.resolvePrediction(engineKey, lastPred.period,
         engineType === 'number' ? actualNumber :
         engineType === 'colour' ? actualColour : actualSize);
 
@@ -119,7 +155,7 @@ async function processTimeframe(tf) {
     }
   }
 
-  /* Learn patterns for this timeframe (shared across engines) */
+  /* Learn patterns */
   const existingPatterns = await db.loadAllPatterns(`${tf}_number`);
   const newPatterns = eng.learnPatterns(`${tf}`, numbers, existingPatterns);
 
@@ -138,21 +174,18 @@ async function processTimeframe(tf) {
   const nextPeriod = (BigInt(latestPeriod) + 1n).toString();
   const context = eng.makeContext(numbers);
 
-  /* Number */
   const nPred = eng.predictNumber(context, newPatterns);
   if (nPred) {
     state[tf].number.status = { period: nextPeriod, ...nPred };
     await db.savePrediction(`${tf}_number`, nextPeriod, nPred.prediction, nPred.confidence);
   }
 
-  /* Colour */
   const cPred = eng.predictColour(context, newPatterns);
   if (cPred) {
     state[tf].colour.status = { period: nextPeriod, ...cPred };
     await db.savePrediction(`${tf}_colour`, nextPeriod, cPred.prediction, cPred.confidence);
   }
 
-  /* Big-Small */
   const bPred = eng.predictSize(context, newPatterns);
   if (bPred) {
     state[tf].bigsmall.status = { period: nextPeriod, ...bPred };
@@ -171,30 +204,28 @@ async function processTimeframe(tf) {
   await db.updateCombinedState(tf, allAt100);
 
   if (allAt100 && !prevCombined) {
-    console.log(`[${tf}] 🎯 COMBINED ACTIVE`);
+    console.log(`[${tf}] COMBINED ACTIVE`);
   } else if (!allAt100 && prevCombined) {
-    console.log(`[${tf}] ✗ COMBINED OFF`);
+    console.log(`[${tf}] COMBINED OFF`);
   }
 
   /* Check JACKPOT */
-  if (allAt100 && nPred && cPred && bPred) {
-    const actualNumber = latestNumber;
-    const actualSize = eng.sizeOf(actualNumber);
-    const actualColour = eng.colourOf(actualNumber);
+  if (allAt100 && state[tf].combinedPrev &&
+      state[tf].combinedPrev.period === latestPeriod) {
+    const actualSize = eng.sizeOf(latestNumber);
+    const actualColour = eng.colourOf(latestNumber);
+    const actualNum = String(latestNumber);
 
-    /* Check previous combined prediction against actual */
-    if (state[tf].combinedPrev &&
-        state[tf].combinedPrev.period === latestPeriod &&
-        state[tf].combinedPrev.bigsmall === actualSize &&
+    if (state[tf].combinedPrev.bigsmall === actualSize &&
         state[tf].combinedPrev.colour === actualColour &&
-        state[tf].combinedPrev.number === String(actualNumber)) {
+        state[tf].combinedPrev.number === actualNum) {
       await db.incrementJackpot(tf);
       await db.saveJackpot(tf, latestPeriod,
         state[tf].combinedPrev.bigsmall,
         state[tf].combinedPrev.colour,
         state[tf].combinedPrev.number,
-        actualNumber);
-      console.log(`[${tf}] 🏆 JACKPOT! period=${latestPeriod}`);
+        latestNumber);
+      console.log(`[${tf}] JACKPOT! period=${latestPeriod}`);
     }
   }
 
@@ -212,7 +243,7 @@ async function processTimeframe(tf) {
 }
 
 /* ============================================================
-   Main loop
+   Main loop — हर 30 सेकंड
 ============================================================ */
 async function mainLoop() {
   try {
@@ -296,10 +327,7 @@ async function start() {
   await db.initDB();
   console.log('[SERVER] DB ready');
 
-  /* First run immediately */
   await mainLoop();
-
-  /* Then every 30 seconds */
   setInterval(mainLoop, 30 * 1000);
 
   app.listen(PORT, () => {
