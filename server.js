@@ -1,10 +1,10 @@
 /* ============================================================
-   WINGO GENIUS SERVER — TLS Fingerprint Bypass
-   curl-cffi-node के साथ Chrome impersonation
+   WINGO GENIUS SERVER
+   @m4eba/node-libcurl-impersonate के साथ
 ============================================================ */
 
 const express = require('express');
-const { Curl } = require('curl-cffi-node');
+const { Curl } = require('@m4eba/node-libcurl-impersonate');
 const db = require('./database');
 const eng = require('./engines');
 
@@ -19,30 +19,30 @@ const state = {
   '1m':  { number: { patterns: [], history: [], status: null }, colour: { patterns: [], history: [], status: null }, bigsmall: { patterns: [], history: [], status: null }, lastPeriod: null, combined: false, combinedPrev: null }
 };
 
-/* ============================================================
-   Fetch API — curl-cffi-node के साथ Chrome impersonation
-============================================================ */
 async function fetchAPI(apiUrl) {
   const targetUrl = apiUrl + '?ts=' + Date.now();
 
   try {
     const curl = new Curl();
-    // Chrome 120 का पूरा TLS/HTTP2 fingerprint impersonate करें
-    curl.impersonateStr('chrome120');
-    curl.setoptStr(2, targetUrl);       // CurlOpt.Url
-    curl.setoptLong(52, 1);             // FollowLocation
-    curl.setoptLong(13, 10);            // MaxRedirs
-    curl.setoptLong(155, 30000);        // TimeoutMs
+    curl.setOpt('URL', targetUrl);
+    curl.setOpt('FOLLOWLOCATION', true);
+    curl.setOpt('TIMEOUT', 30);
+    curl.setOpt('USERAGENT', 'Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36');
+    curl.setOpt('HTTPHEADER', [
+      'Accept: application/json, text/plain, */*',
+      'Accept-Language: en-IN,en-US;q=0.9,en;q=0.8',
+      'Referer: https://draw.ar-lottery01.com/'
+    ]);
 
-    const result = await curl.performAsync();
+    const result = await new Promise((resolve, reject) => {
+      curl.on('end', (statusCode, body) => resolve({ statusCode, body }));
+      curl.on('error', reject);
+      curl.perform();
+    });
 
-    if (result.statusCode !== 200) {
-      throw new Error('HTTP ' + result.statusCode);
-    }
+    if (result.statusCode !== 200) throw new Error('HTTP ' + result.statusCode);
 
-    const text = result.body.toString();
-    let j;
-    try { j = JSON.parse(text); } catch (e) { throw new Error('bad JSON'); }
+    const j = JSON.parse(result.body);
     if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
 
     const list = j.data.list.map(x => ({
@@ -59,9 +59,6 @@ async function fetchAPI(apiUrl) {
   }
 }
 
-/* ============================================================
-   Process one timeframe
-============================================================ */
 async function processTimeframe(tf) {
   const apiUrl = tf === '30s' ? API_30S : API_1M;
   const list = await fetchAPI(apiUrl);
