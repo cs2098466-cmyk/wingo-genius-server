@@ -1,6 +1,6 @@
 /* ============================================================
    WINGO GENIUS SERVER
-   ScraperAPI + CORS
+   ScraperAPI + Training Phase + Two Timeframes
 ============================================================ */
 
 const express = require('express');
@@ -11,7 +11,7 @@ const eng = require('./engines');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* CORS — dashboard को data देने के लिए */
+/* CORS */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -25,30 +25,62 @@ const SCRAPERAPI_KEY = process.env.SCRAPERAPI_KEY || '48a41579427a541a3328397389
 const API_30S = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 const API_1M = 'https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json';
 
+const TRAINING_ROUNDS = 100;
+const COMBINED_ACTIVE = 50;
+const COMBINED_FULL = 100;
+
+/* ---------- Engine state ---------- */
+function blankEngine() {
+  return {
+    rounds: 0,
+    wins: 0,
+    losses: 0,
+    correctCount: 0,
+    currentStreak: 0,
+    status: 'TRAINING',
+    pending: null,
+    lastPrediction: null,
+    lastActual: null,
+    lastResult: null,
+    recent: []
+  };
+}
+
 const state = {
-  '30s': { number: { patterns: [], history: [], status: null }, colour: { patterns: [], history: [], status: null }, bigsmall: { patterns: [], history: [], status: null }, lastPeriod: null, combined: false, combinedPrev: null },
-  '1m':  { number: { patterns: [], history: [], status: null }, colour: { patterns: [], history: [], status: null }, bigsmall: { patterns: [], history: [], status: null }, lastPeriod: null, combined: false, combinedPrev: null }
+  '30s': {
+    number: blankEngine(),
+    colour: blankEngine(),
+    bigsmall: blankEngine(),
+    combined: { status: 'WAITING', jackpots: 0, pendingCombined: null, history: [] },
+    lastPeriod: null,
+    apiHistory: []
+  },
+  '1m': {
+    number: blankEngine(),
+    colour: blankEngine(),
+    bigsmall: blankEngine(),
+    combined: { status: 'WAITING', jackpots: 0, pendingCombined: null, history: [] },
+    lastPeriod: null,
+    apiHistory: []
+  }
 };
 
+/* ---------- Fetch via ScraperAPI ---------- */
 async function fetchAPI(apiUrl) {
   const targetUrl = apiUrl + '?ts=' + Date.now();
   const scraperUrl = 'https://api.scraperapi.com/?api_key=' + SCRAPERAPI_KEY + '&url=' + encodeURIComponent(targetUrl);
-
   try {
     const r = await fetch(scraperUrl, { method: 'GET', cache: 'no-store' });
     if (r.status !== 200) throw new Error('ScraperAPI HTTP ' + r.status);
-
     const text = await r.text();
     let j;
     try { j = JSON.parse(text); } catch (e) { throw new Error('bad JSON'); }
     if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
-
     const list = j.data.list.map(x => ({
       period: String(x.issueNumber),
       number: parseInt(x.number, 10)
     })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
       .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
-
     console.log(`[API] OK · ${list.length} periods`);
     return list;
   } catch (e) {
@@ -57,6 +89,115 @@ async function fetchAPI(apiUrl) {
   }
 }
 
+/* ---------- Resolve a pending prediction ---------- */
+function resolveEngine(tf, engineType, latestPeriod, latestNumber) {
+  const e = state[tf][engineType];
+  if (!e.pending) return;
+  if (e.pending.period !== latestPeriod) return;
+
+  const pred = e.pending.prediction;
+  let actual = null;
+  if (engineType === 'number') actual = String(latestNumber);
+  else if (engineType === 'colour') actual = eng.colourOf(latestNumber);
+  else actual = eng.sizeOf(latestNumber);
+
+  const win = (pred === actual);
+  e.lastPrediction = pred;
+  e.lastActual = actual;
+  e.lastResult = win ? 'WIN' : 'LOSS';
+  if (win) {
+    e.wins++;
+    e.correctCount++;
+    e.currentStreak = e.currentStreak > 0 ? e.currentStreak + 1 : 1;
+  } else {
+    e.losses++;
+    e.currentStreak = e.currentStreak < 0 ? e.currentStreak - 1 : -1;
+  }
+
+  e.recent.unshift({
+    period: latestPeriod,
+    prediction: pred,
+    actual: actual,
+    status: win ? 'WIN' : 'LOSS'
+  });
+  if (e.recent.length > 30) e.recent.pop();
+
+  e.pending = null;
+}
+
+/* ---------- Make prediction for next period ---------- */
+function makePrediction(tf, engineType, patterns, latestPeriod, numbers) {
+  const e = state[tf][engineType];
+  if (e.rounds < TRAINING_ROUNDS) return;
+
+  const nextPeriod = (BigInt(latestPeriod) + 1n).toString();
+  const context = eng.makeContext(numbers);
+
+  let pred = null;
+  if (engineType === 'number') pred = eng.predictNumber(context, patterns);
+  else if (engineType === 'colour') pred = eng.predictColour(context, patterns);
+  else pred = eng.predictSize(context, patterns);
+
+  if (pred) {
+    e.pending = { period: nextPeriod, prediction: pred.prediction };
+  }
+}
+
+/* ---------- Update combined status ---------- */
+function updateCombined(tf) {
+  const s = state[tf];
+  const n = s.number.correctCount;
+  const c = s.colour.correctCount;
+  const b = s.bigsmall.correctCount;
+
+  if (n >= COMBINED_FULL && c >= COMBINED_FULL && b >= COMBINED_FULL) {
+    s.combined.status = 'FULL';
+  } else if (n >= COMBINED_ACTIVE && c >= COMBINED_ACTIVE && b >= COMBINED_ACTIVE) {
+    s.combined.status = 'ACTIVE';
+  } else {
+    s.combined.status = 'WAITING';
+  }
+}
+
+/* ---------- Record combined prediction ---------- */
+function makeCombinedPrediction(tf, latestPeriod) {
+  const s = state[tf];
+  if (s.combined.status === 'WAITING') return;
+  const n = s.number.pending;
+  const c = s.colour.pending;
+  const b = s.bigsmall.pending;
+  const nextP = (BigInt(latestPeriod) + 1n).toString();
+  if (n && c && b && n.period === nextP && c.period === nextP && b.period === nextP) {
+    s.combined.pendingCombined = {
+      period: nextP,
+      number: n.prediction,
+      colour: c.prediction,
+      bigsmall: b.prediction
+    };
+  }
+}
+
+function resolveCombined(tf, latestPeriod, latestNumber) {
+  const s = state[tf];
+  const pc = s.combined.pendingCombined;
+  if (!pc || pc.period !== latestPeriod) return;
+  const actualNum = String(latestNumber);
+  const actualCol = eng.colourOf(latestNumber);
+  const actualSize = eng.sizeOf(latestNumber);
+  const win = pc.number === actualNum && pc.colour === actualCol && pc.bigsmall === actualSize;
+
+  s.combined.history.unshift({
+    period: latestPeriod,
+    predicted: `${pc.number} · ${pc.colour} · ${pc.bigsmall}`,
+    actual: `${actualNum} · ${actualCol} · ${actualSize}`,
+    status: win ? 'JACKPOT' : 'MISS'
+  });
+  if (s.combined.history.length > 30) s.combined.history.pop();
+  if (win) s.combined.jackpots++;
+  s.combined.pendingCombined = null;
+}
+
+/* ---------- Process one timeframe ---------- */
 async function processTimeframe(tf) {
   const apiUrl = tf === '30s' ? API_30S : API_1M;
   const list = await fetchAPI(apiUrl);
@@ -65,32 +206,28 @@ async function processTimeframe(tf) {
   const latest = list[0];
   const latestPeriod = latest.period;
   const latestNumber = latest.number;
-  if (state[tf].lastPeriod === latestPeriod) return;
 
+  if (state[tf].lastPeriod === latestPeriod) return;
+  state[tf].lastPeriod = latestPeriod;
+
+  /* 1. Resolve previous predictions */
+  for (const et of ['number', 'colour', 'bigsmall']) {
+    resolveEngine(tf, et, latestPeriod, latestNumber);
+  }
+  resolveCombined(tf, latestPeriod, latestNumber);
+
+  /* 2. Add to apiHistory */
+  state[tf].apiHistory.unshift({
+    period: latestPeriod,
+    number: latestNumber,
+    size: eng.sizeOf(latestNumber),
+    colour: eng.colourOf(latestNumber)
+  });
+  if (state[tf].apiHistory.length > 40) state[tf].apiHistory.pop();
+
+  /* 3. Learn patterns */
   const chrono = list.slice(0, 100).reverse();
   const numbers = chrono.map(x => x.number);
-  state[tf].number.history = numbers;
-
-  for (const engineType of ['number', 'colour', 'bigsmall']) {
-    const engineKey = `${tf}_${engineType}`;
-    const lastPred = state[tf][engineType].status;
-    if (lastPred && lastPred.period === latestPeriod) {
-      const actualSize = eng.sizeOf(latestNumber);
-      const actualColour = eng.colourOf(latestNumber);
-      const actualNumber = String(latestNumber);
-      let win = engineType === 'number' ? (lastPred.prediction === actualNumber) : engineType === 'colour' ? (lastPred.prediction === actualColour) : (lastPred.prediction === actualSize);
-
-      const oldStatus = await db.getEngineStatus(engineKey) || { streak: 0, wins: 0, losses: 0, rounds: 0 };
-      const newStreak = win ? (oldStatus.streak || 0) + 1 : 0;
-      const newWins = win ? (oldStatus.wins || 0) + 1 : oldStatus.wins || 0;
-      const newLosses = win ? oldStatus.losses || 0 : (oldStatus.losses || 0) + 1;
-      const newRounds = (oldStatus.rounds || 0) + 1;
-
-      await db.updateEngineStatus(engineKey, { streak: newStreak, wins: newWins, losses: newLosses, rounds: newRounds, last_prediction: lastPred.prediction, last_confidence: lastPred.confidence, last_period: lastPred.period });
-      await db.resolvePrediction(engineKey, lastPred.period, engineType === 'number' ? actualNumber : engineType === 'colour' ? actualColour : actualSize);
-      console.log(`[${engineKey}] ${win ? 'WIN' : 'LOSS'} · streak=${newStreak}`);
-    }
-  }
 
   const existingPatterns = await db.loadAllPatterns(`${tf}_number`);
   const newPatterns = eng.learnPatterns(`${tf}`, numbers, existingPatterns);
@@ -99,95 +236,75 @@ async function processTimeframe(tf) {
     await db.upsertPattern(`${tf}_colour`, p.context, p);
     await db.upsertPattern(`${tf}_bigsmall`, p.context, p);
   }
-  state[tf].number.patterns = newPatterns;
-  state[tf].colour.patterns = newPatterns;
-  state[tf].bigsmall.patterns = newPatterns;
 
-  const nextPeriod = (BigInt(latestPeriod) + 1n).toString();
-  const context = eng.makeContext(numbers);
+  /* 4. Increment rounds */
+  state[tf].number.rounds++;
+  state[tf].colour.rounds++;
+  state[tf].bigsmall.rounds++;
 
-  const nPred = eng.predictNumber(context, newPatterns);
-  if (nPred) { state[tf].number.status = { period: nextPeriod, ...nPred }; await db.savePrediction(`${tf}_number`, nextPeriod, nPred.prediction, nPred.confidence); }
-  const cPred = eng.predictColour(context, newPatterns);
-  if (cPred) { state[tf].colour.status = { period: nextPeriod, ...cPred }; await db.savePrediction(`${tf}_colour`, nextPeriod, cPred.prediction, cPred.confidence); }
-  const bPred = eng.predictSize(context, newPatterns);
-  if (bPred) { state[tf].bigsmall.status = { period: nextPeriod, ...bPred }; await db.savePrediction(`${tf}_bigsmall`, nextPeriod, bPred.prediction, bPred.confidence); }
-
-  const s1 = await db.getEngineStatus(`${tf}_number`) || { streak: 0 };
-  const s2 = await db.getEngineStatus(`${tf}_colour`) || { streak: 0 };
-  const s3 = await db.getEngineStatus(`${tf}_bigsmall`) || { streak: 0 };
-  const allAt100 = (s1.streak >= 100) && (s2.streak >= 100) && (s3.streak >= 100);
-
-  const prevCombined = state[tf].combined;
-  state[tf].combined = allAt100;
-  await db.updateCombinedState(tf, allAt100);
-
-  if (allAt100 && !prevCombined) console.log(`[${tf}] COMBINED ACTIVE`);
-  else if (!allAt100 && prevCombined) console.log(`[${tf}] COMBINED OFF`);
-
-  if (allAt100 && state[tf].combinedPrev && state[tf].combinedPrev.period === latestPeriod) {
-    const actualSize = eng.sizeOf(latestNumber);
-    const actualColour = eng.colourOf(latestNumber);
-    const actualNum = String(latestNumber);
-    if (state[tf].combinedPrev.bigsmall === actualSize && state[tf].combinedPrev.colour === actualColour && state[tf].combinedPrev.number === actualNum) {
-      await db.incrementJackpot(tf);
-      await db.saveJackpot(tf, latestPeriod, state[tf].combinedPrev.bigsmall, state[tf].combinedPrev.colour, state[tf].combinedPrev.number, latestNumber);
-      console.log(`[${tf}] JACKPOT! period=${latestPeriod}`);
-    }
+  /* 5. Make predictions */
+  for (const et of ['number', 'colour', 'bigsmall']) {
+    makePrediction(tf, et, newPatterns, latestPeriod, numbers);
   }
 
-  if (allAt100) {
-    state[tf].combinedPrev = { period: nextPeriod, bigsmall: bPred ? bPred.prediction : null, colour: cPred ? cPred.prediction : null, number: nPred ? nPred.prediction : null };
-  }
+  /* 6. Update combined */
+  updateCombined(tf);
+  makeCombinedPrediction(tf, latestPeriod);
 
-  state[tf].lastPeriod = latestPeriod;
-  console.log(`[${tf}] period=${latestPeriod} num=${latestNumber} ctx=${context} | num=${nPred ? nPred.prediction : '-'} col=${cPred ? cPred.prediction : '-'} bs=${bPred ? bPred.prediction : '-'} | combined=${allAt100}`);
+  const s = state[tf];
+  console.log(`[${tf}] ${latestPeriod.slice(-6)} num=${latestNumber} | rounds N${s.number.rounds}/C${s.colour.rounds}/B${s.bigsmall.rounds} | status ${s.number.status}/${s.colour.status}/${s.bigsmall.status} | combined ${s.combined.status}`);
 }
 
-async function loop30S() {
-  try { await processTimeframe('30s'); } catch (e) { console.error('[30s ERROR]', e.message); }
+async function loop30S() { try { await processTimeframe('30s'); } catch (e) { console.error('[30s]', e.message); } }
+async function loop1M()  { try { await processTimeframe('1m');  } catch (e) { console.error('[1m]', e.message); } }
+
+/* ---------- Serialize for API ---------- */
+function serializeEngine(e) {
+  const total = e.wins + e.losses;
+  return {
+    rounds: e.rounds,
+    trainingProgress: Math.min(100, Math.round(e.rounds / TRAINING_ROUNDS * 100)),
+    wins: e.wins,
+    losses: e.losses,
+    accuracy: total > 0 ? Math.round(e.wins / total * 100) : 0,
+    correctCount: e.correctCount,
+    currentStreak: e.currentStreak,
+    status: e.rounds < TRAINING_ROUNDS ? 'TRAINING' : (e.correctCount > 0 || total > 0 ? 'LIVE' : 'READY'),
+    lastPrediction: e.pending ? e.pending.prediction : e.lastPrediction,
+    lastActual: e.lastActual,
+    lastResult: e.lastResult,
+    pendingPeriod: e.pending ? e.pending.period : null,
+    pendingPrediction: e.pending ? e.pending.prediction : null,
+    recent: e.recent.slice(0, 15)
+  };
 }
 
-async function loop1M() {
-  try { await processTimeframe('1m'); } catch (e) { console.error('[1m ERROR]', e.message); }
-}
-
+/* ---------- Routes ---------- */
 app.get('/', (req, res) => {
-  res.json({ name: 'WinGo Genius AI Server', status: 'running', uptime: process.uptime(), time: new Date().toISOString() });
+  res.json({ name: 'WinGo Genius AI Server', status: 'running', uptime: process.uptime() });
 });
 
-app.get('/api/status', async (req, res) => {
-  try {
-    const result = {};
-    for (const tf of ['30s', '1m']) {
-      result[tf] = {};
-      for (const et of ['number', 'colour', 'bigsmall']) {
-        const key = `${tf}_${et}`;
-        const status = await db.getEngineStatus(key) || {};
-        const recentPreds = await db.getRecentPredictions(key, 20);
-        result[tf][et] = {
-          streak: status.streak || 0,
-          wins: status.wins || 0,
-          losses: status.losses || 0,
-          rounds: status.rounds || 0,
-          accuracy: (status.wins + status.losses) > 0 ? Math.round(status.wins / (status.wins + status.losses) * 100) : 0,
-          last_prediction: status.last_prediction,
-          last_confidence: status.last_confidence,
-          last_period: status.last_period,
-          recent: recentPreds.map(p => ({ period: p.period, prediction: p.prediction, actual: p.actual, status: p.status, confidence: p.confidence }))
-        };
-      }
-      const cs = await db.getCombinedState(tf) || {};
-      result[tf].combined = {
-        active: cs.active || false,
-        jackpots: cs.jackpot_count || 0,
-        recentJackpots: (await db.getRecentJackpots(tf, 10)).map(j => ({ period: j.period, number: j.actual_number, bigsmall: j.bigsmall_pred, colour: j.colour_pred, number_pred: j.number_pred }))
-      };
-    }
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+app.get('/api/status', (req, res) => {
+  const result = {};
+  for (const tf of ['30s', '1m']) {
+    const s = state[tf];
+    result[tf] = {
+      number: serializeEngine(s.number),
+      colour: serializeEngine(s.colour),
+      bigsmall: serializeEngine(s.bigsmall),
+      combined: {
+        status: s.combined.status,
+        jackpots: s.combined.jackpots,
+        history: s.combined.history.slice(0, 20)
+      },
+      apiHistory: s.apiHistory.slice(0, 25),
+      lastPeriod: s.lastPeriod
+    };
+  }
+  res.json(result);
 });
 
+/* ---------- Start ---------- */
 async function start() {
   console.log('[SERVER] Starting...');
   await db.initDB();
@@ -195,13 +312,13 @@ async function start() {
 
   await loop30S();
   setInterval(loop30S, 30 * 1000);
-  console.log('[SERVER] 30S loop started (30s interval)');
+  console.log('[SERVER] 30S loop started');
 
   await loop1M();
   setInterval(loop1M, 60 * 1000);
-  console.log('[SERVER] 1M loop started (60s interval)');
+  console.log('[SERVER] 1M loop started');
 
-  app.listen(PORT, () => { console.log(`[SERVER] Listening on port ${PORT}`); });
+  app.listen(PORT, () => console.log(`[SERVER] Listening on port ${PORT}`));
 }
 
 start().catch(e => { console.error('[FATAL]', e); process.exit(1); });
