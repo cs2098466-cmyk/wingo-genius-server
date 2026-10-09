@@ -1,30 +1,29 @@
 /* ============================================================
-   WINGO GENIUS SERVER
-   ScraperAPI + Training Phase + Two Timeframes
+   WINGO GENIUS SERVER (Updated for APK Data Ingestion)
+   Removed ScraperAPI + Added /api/ingest endpoint
 ============================================================ */
 
 const express = require('express');
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const db = require('./database');
 const eng = require('./engines');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* CORS */
+/* ---------- CORS & JSON Middleware ---------- */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  // POST और OPTIONS जोड़े गए हैं
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
-const SCRAPERAPI_KEY = process.env.SCRAPERAPI_KEY || '48a41579427a541a33283973894cef24';
+// APK से बड़ा डेटा आ सकता है, इसलिए limit बढ़ाई गई है
+app.use(express.json({ limit: '10mb' }));
 
-const API_30S = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
-const API_1M = 'https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json';
-
+/* ---------- Constants ---------- */
 const TRAINING_ROUNDS = 100;
 const COMBINED_ACTIVE = 50;
 const COMBINED_FULL = 100;
@@ -46,48 +45,24 @@ function blankEngine() {
   };
 }
 
-const state = {
-  '30s': {
+// चारों timeframes के लिए state तैयार करना
+function createTimeframeState() {
+  return {
     number: blankEngine(),
     colour: blankEngine(),
     bigsmall: blankEngine(),
     combined: { status: 'WAITING', jackpots: 0, pendingCombined: null, history: [] },
     lastPeriod: null,
     apiHistory: []
-  },
-  '1m': {
-    number: blankEngine(),
-    colour: blankEngine(),
-    bigsmall: blankEngine(),
-    combined: { status: 'WAITING', jackpots: 0, pendingCombined: null, history: [] },
-    lastPeriod: null,
-    apiHistory: []
-  }
-};
-
-/* ---------- Fetch via ScraperAPI ---------- */
-async function fetchAPI(apiUrl) {
-  const targetUrl = apiUrl + '?ts=' + Date.now();
-  const scraperUrl = 'https://api.scraperapi.com/?api_key=' + SCRAPERAPI_KEY + '&url=' + encodeURIComponent(targetUrl);
-  try {
-    const r = await fetch(scraperUrl, { method: 'GET', cache: 'no-store' });
-    if (r.status !== 200) throw new Error('ScraperAPI HTTP ' + r.status);
-    const text = await r.text();
-    let j;
-    try { j = JSON.parse(text); } catch (e) { throw new Error('bad JSON'); }
-    if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
-    const list = j.data.list.map(x => ({
-      period: String(x.issueNumber),
-      number: parseInt(x.number, 10)
-    })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
-      .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
-    console.log(`[API] OK · ${list.length} periods`);
-    return list;
-  } catch (e) {
-    console.error('[API ERROR]', e.message);
-    return [];
-  }
+  };
 }
+
+const state = {
+  '30s': createTimeframeState(),
+  '1m':  createTimeframeState(),
+  '3m':  createTimeframeState(),
+  '5m':  createTimeframeState()
+};
 
 /* ---------- Resolve a pending prediction ---------- */
 function resolveEngine(tf, engineType, latestPeriod, latestNumber) {
@@ -197,17 +172,19 @@ function resolveCombined(tf, latestPeriod, latestNumber) {
   s.combined.pendingCombined = null;
 }
 
-/* ---------- Process one timeframe ---------- */
-async function processTimeframe(tf) {
-  const apiUrl = tf === '30s' ? API_30S : API_1M;
-  const list = await fetchAPI(apiUrl);
-  if (!list.length) return;
+/* ============================================================
+   NEW FUNCTION: ingestList (पहले processTimeframe था)
+   यह अब सीधे APK से मिले डेटा को process करेगा
+============================================================ */
+async function ingestList(tf, list) {
+  if (!list || !list.length) return 0;
 
   const latest = list[0];
   const latestPeriod = latest.period;
   const latestNumber = latest.number;
 
-  if (state[tf].lastPeriod === latestPeriod) return;
+  // अगर यह पीरियड पहले ही प्रोसेस हो चुका है तो कुछ न करें
+  if (state[tf].lastPeriod === latestPeriod) return 0;
   state[tf].lastPeriod = latestPeriod;
 
   /* 1. Resolve previous predictions */
@@ -231,6 +208,7 @@ async function processTimeframe(tf) {
 
   const existingPatterns = await db.loadAllPatterns(`${tf}_number`);
   const newPatterns = eng.learnPatterns(`${tf}`, numbers, existingPatterns);
+  
   for (const p of newPatterns) {
     await db.upsertPattern(`${tf}_number`, p.context, p);
     await db.upsertPattern(`${tf}_colour`, p.context, p);
@@ -252,11 +230,58 @@ async function processTimeframe(tf) {
   makeCombinedPrediction(tf, latestPeriod);
 
   const s = state[tf];
-  console.log(`[${tf}] ${latestPeriod.slice(-6)} num=${latestNumber} | rounds N${s.number.rounds}/C${s.colour.rounds}/B${s.bigsmall.rounds} | status ${s.number.status}/${s.colour.status}/${s.bigsmall.status} | combined ${s.combined.status}`);
+  console.log(`[INGEST][${tf}] ${latestPeriod.slice(-6)} num=${latestNumber} | rounds N${s.number.rounds}/C${s.colour.rounds}/B${s.bigsmall.rounds} | status ${s.number.status}/${s.colour.status}/${s.bigsmall.status} | combined ${s.combined.status}`);
+  
+  return list.length;
 }
 
-async function loop30S() { try { await processTimeframe('30s'); } catch (e) { console.error('[30s]', e.message); } }
-async function loop1M()  { try { await processTimeframe('1m');  } catch (e) { console.error('[1m]', e.message); } }
+/* ============================================================
+   NEW ENDPOINT: /api/ingest
+   APK यहाँ डेटा POST करेगी
+============================================================ */
+app.post('/api/ingest', async (req, res) => {
+  try {
+    const { timeframe, raw } = req.body;
+
+    if (!timeframe || !raw) {
+      return res.status(400).json({ error: 'missing timeframe or raw' });
+    }
+
+    // चेक करें कि timeframe सही है या नहीं
+    if (!['30s', '1m', '3m', '5m'].includes(timeframe)) {
+      return res.status(400).json({ error: 'invalid timeframe' });
+    }
+
+    const j = raw;
+    if (!j || !j.data || !j.data.list) {
+      return res.status(400).json({ error: 'bad shape: raw.data.list not found' });
+    }
+
+    // डेटा को process करने लायक format में बदलें
+    const list = j.data.list.map(x => ({
+      period: String(x.issueNumber),
+      number: parseInt(x.number, 10)
+    }))
+    .filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
+    .sort((a, b) => {
+      try {
+        return BigInt(b.period) > BigInt(a.period) ? 1 : -1;
+      } catch(e) { return 0; }
+    });
+
+    if (!list.length) return res.json({ ok: true, processed: 0 });
+
+    // मुख्य प्रोसेसिंग फंक्शन को कॉल करें
+    const processed = await ingestList(timeframe, list);
+
+    console.log(`[INGEST SUCCESS] ${timeframe} · ${list.length} periods · ${list[0].period}`);
+    res.json({ ok: true, processed: processed });
+
+  } catch (e) {
+    console.error('[INGEST ERROR]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 /* ---------- Serialize for API ---------- */
 function serializeEngine(e) {
@@ -286,7 +311,8 @@ app.get('/', (req, res) => {
 
 app.get('/api/status', (req, res) => {
   const result = {};
-  for (const tf of ['30s', '1m']) {
+  // चारों timeframes के लिए डेटा भेजें
+  for (const tf of ['30s', '1m', '3m', '5m']) {
     const s = state[tf];
     result[tf] = {
       number: serializeEngine(s.number),
@@ -310,13 +336,8 @@ async function start() {
   await db.initDB();
   console.log('[SERVER] DB ready');
 
-  await loop30S();
-  setInterval(loop30S, 30 * 1000);
-  console.log('[SERVER] 30S loop started');
-
-  await loop1M();
-  setInterval(loop1M, 60 * 1000);
-  console.log('[SERVER] 1M loop started');
+  // पुराने loops और setInterval हटा दिए गए हैं
+  // अब सर्वर सिर्फ APK से डेटा आने का इंतज़ार करेगा
 
   app.listen(PORT, () => console.log(`[SERVER] Listening on port ${PORT}`));
 }
