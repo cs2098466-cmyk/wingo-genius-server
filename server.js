@@ -1,6 +1,8 @@
 /* ============================================================
    WINGO GENIUS SERVER
-   FlareSolverr के साथ — Cloudflare bypass
+   Comprehensive Browser Impersonation
+   - Multiple header sets
+   - Retry on failure
 ============================================================ */
 
 const express = require('express');
@@ -11,9 +13,6 @@ const eng = require('./engines');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* FlareSolverr का URL — Render पर deploy करने के बाद यहाँ डालें */
-const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'http://localhost:8191';
-
 const API_30S = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 const API_1M = 'https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json';
 
@@ -23,49 +22,119 @@ const state = {
 };
 
 /* ============================================================
-   Fetch API data — FlareSolverr के through
+   हर तरह के headers के 5 sets
+============================================================ */
+const HEADER_SETS = [
+  /* Set 1: Chrome Desktop */
+  {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://draw.ar-lottery01.com/',
+    'Origin': 'https://draw.ar-lottery01.com',
+    'Connection': 'keep-alive',
+    'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    'Pragma': 'no-cache',
+    'Cache-Control': 'no-cache'
+  },
+  /* Set 2: Chrome Android */
+  {
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://draw.ar-lottery01.com/',
+    'Origin': 'https://draw.ar-lottery01.com',
+    'Connection': 'keep-alive',
+    'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"Android"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    'Pragma': 'no-cache',
+    'Cache-Control': 'no-cache'
+  },
+  /* Set 3: Firefox */
+  {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://draw.ar-lottery01.com/',
+    'Origin': 'https://draw.ar-lottery01.com',
+    'Connection': 'keep-alive',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    'Pragma': 'no-cache',
+    'Cache-Control': 'no-cache'
+  },
+  /* Set 4: Safari */
+  {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://draw.ar-lottery01.com/',
+    'Origin': 'https://draw.ar-lottery01.com',
+    'Connection': 'keep-alive'
+  },
+  /* Set 5: Minimal */
+  {
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+    'Accept': 'application/json',
+    'Referer': 'https://draw.ar-lottery01.com/'
+  }
+];
+
+/* ============================================================
+   Fetch API — 5 header sets try करेगा
 ============================================================ */
 async function fetchAPI(apiUrl) {
   const targetUrl = apiUrl + '?ts=' + Date.now();
 
-  try {
-    const body = {
-      cmd: 'request.get',
-      url: targetUrl,
-      maxTimeout: 60000
-    };
+  for (let i = 0; i < HEADER_SETS.length; i++) {
+    const headers = HEADER_SETS[i];
+    const label = `Set-${i + 1}`;
 
-    const r = await fetch(`${FLARESOLVERR_URL}/v1`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
+    try {
+      const r = await fetch(targetUrl, {
+        method: 'GET',
+        cache: 'no-store',
+        headers: headers
+      });
 
-    if (!r.ok) throw new Error('FlareSolverr HTTP ' + r.status);
+      if (r.status === 200) {
+        const text = await r.text();
+        let j;
+        try { j = JSON.parse(text); } catch (e) { throw new Error('bad JSON'); }
+        if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
 
-    const j = await r.json();
-    if (j.status !== 'ok' || !j.solution) {
-      throw new Error('FlareSolverr error: ' + (j.message || 'unknown'));
+        const list = j.data.list.map(x => ({
+          period: String(x.issueNumber),
+          number: parseInt(x.number, 10)
+        })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
+          .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
+
+        console.log(`[API] OK ${label} · ${list.length} periods`);
+        return list;
+      } else {
+        console.log(`[API] ${label} failed · HTTP ${r.status}`);
+      }
+    } catch (e) {
+      console.log(`[API] ${label} error: ${e.message}`);
     }
-
-    const responseText = j.solution.response;
-    let data;
-    try { data = JSON.parse(responseText); } catch (e) { throw new Error('bad JSON from FlareSolverr'); }
-
-    if (!data || !data.data || !data.data.list) throw new Error('wrong shape');
-
-    const list = data.data.list.map(x => ({
-      period: String(x.issueNumber),
-      number: parseInt(x.number, 10)
-    })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
-      .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
-
-    console.log(`[API] OK · ${list.length} periods`);
-    return list;
-  } catch (e) {
-    console.error('[API ERROR]', e.message);
-    return [];
   }
+
+  console.error('[API] All 5 header sets failed');
+  return [];
 }
 
 /* ============================================================

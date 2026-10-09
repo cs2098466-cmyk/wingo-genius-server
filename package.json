@@ -1,7 +1,6 @@
 {
   "name": "wingo-genius-server",
   "version": "1.0.0",
-  "description": "WinGo Genius AI Server with FlareSolverr",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
