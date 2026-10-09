@@ -1,10 +1,10 @@
 /* ============================================================
    WINGO GENIUS SERVER
-   @m4eba/node-libcurl-impersonate के साथ
+   node-libcurl-impersonate-ja3 के साथ
 ============================================================ */
 
 const express = require('express');
-const { Curl } = require('@m4eba/node-libcurl-impersonate');
+const { Curl, impersonate, Browser } = require('node-libcurl-impersonate-ja3');
 const db = require('./database');
 const eng = require('./engines');
 
@@ -23,11 +23,10 @@ async function fetchAPI(apiUrl) {
   const targetUrl = apiUrl + '?ts=' + Date.now();
 
   try {
-    const curl = new Curl();
+    const curl = Curl.impersonate(Browser.Chrome);
     curl.setOpt('URL', targetUrl);
     curl.setOpt('FOLLOWLOCATION', true);
     curl.setOpt('TIMEOUT', 30);
-    curl.setOpt('USERAGENT', 'Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36');
     curl.setOpt('HTTPHEADER', [
       'Accept: application/json, text/plain, */*',
       'Accept-Language: en-IN,en-US;q=0.9,en;q=0.8',
@@ -35,14 +34,14 @@ async function fetchAPI(apiUrl) {
     ]);
 
     const result = await new Promise((resolve, reject) => {
-      curl.on('end', (statusCode, body) => resolve({ statusCode, body }));
+      curl.on('end', (statusCode, data) => resolve({ statusCode, data }));
       curl.on('error', reject);
       curl.perform();
     });
 
     if (result.statusCode !== 200) throw new Error('HTTP ' + result.statusCode);
 
-    const j = JSON.parse(result.body);
+    const j = JSON.parse(result.data.toString());
     if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
 
     const list = j.data.list.map(x => ({
