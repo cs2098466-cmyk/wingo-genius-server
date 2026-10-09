@@ -1,8 +1,6 @@
 /* ============================================================
    WINGO GENIUS SERVER
-   Comprehensive Browser Impersonation
-   - Multiple header sets
-   - Retry on failure
+   ScraperAPI के साथ — IP block bypass test
 ============================================================ */
 
 const express = require('express');
@@ -13,6 +11,9 @@ const eng = require('./engines');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+/* ScraperAPI key */
+const SCRAPERAPI_KEY = process.env.SCRAPERAPI_KEY || '48a41579427a541a33283973894cef24';
+
 const API_30S = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 const API_1M = 'https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json';
 
@@ -22,119 +23,39 @@ const state = {
 };
 
 /* ============================================================
-   हर तरह के headers के 5 sets
-============================================================ */
-const HEADER_SETS = [
-  /* Set 1: Chrome Desktop */
-  {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Referer': 'https://draw.ar-lottery01.com/',
-    'Origin': 'https://draw.ar-lottery01.com',
-    'Connection': 'keep-alive',
-    'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'Pragma': 'no-cache',
-    'Cache-Control': 'no-cache'
-  },
-  /* Set 2: Chrome Android */
-  {
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Referer': 'https://draw.ar-lottery01.com/',
-    'Origin': 'https://draw.ar-lottery01.com',
-    'Connection': 'keep-alive',
-    'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24"',
-    'sec-ch-ua-mobile': '?1',
-    'sec-ch-ua-platform': '"Android"',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'Pragma': 'no-cache',
-    'Cache-Control': 'no-cache'
-  },
-  /* Set 3: Firefox */
-  {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Referer': 'https://draw.ar-lottery01.com/',
-    'Origin': 'https://draw.ar-lottery01.com',
-    'Connection': 'keep-alive',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'Pragma': 'no-cache',
-    'Cache-Control': 'no-cache'
-  },
-  /* Set 4: Safari */
-  {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Referer': 'https://draw.ar-lottery01.com/',
-    'Origin': 'https://draw.ar-lottery01.com',
-    'Connection': 'keep-alive'
-  },
-  /* Set 5: Minimal */
-  {
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
-    'Accept': 'application/json',
-    'Referer': 'https://draw.ar-lottery01.com/'
-  }
-];
-
-/* ============================================================
-   Fetch API — 5 header sets try करेगा
+   Fetch API via ScraperAPI
 ============================================================ */
 async function fetchAPI(apiUrl) {
   const targetUrl = apiUrl + '?ts=' + Date.now();
+  const scraperUrl = 'https://api.scraperapi.com/?api_key=' + SCRAPERAPI_KEY + '&url=' + encodeURIComponent(targetUrl);
 
-  for (let i = 0; i < HEADER_SETS.length; i++) {
-    const headers = HEADER_SETS[i];
-    const label = `Set-${i + 1}`;
+  try {
+    const r = await fetch(scraperUrl, {
+      method: 'GET',
+      cache: 'no-store'
+    });
 
-    try {
-      const r = await fetch(targetUrl, {
-        method: 'GET',
-        cache: 'no-store',
-        headers: headers
-      });
-
-      if (r.status === 200) {
-        const text = await r.text();
-        let j;
-        try { j = JSON.parse(text); } catch (e) { throw new Error('bad JSON'); }
-        if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
-
-        const list = j.data.list.map(x => ({
-          period: String(x.issueNumber),
-          number: parseInt(x.number, 10)
-        })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
-          .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
-
-        console.log(`[API] OK ${label} · ${list.length} periods`);
-        return list;
-      } else {
-        console.log(`[API] ${label} failed · HTTP ${r.status}`);
-      }
-    } catch (e) {
-      console.log(`[API] ${label} error: ${e.message}`);
+    if (r.status !== 200) {
+      throw new Error('ScraperAPI HTTP ' + r.status);
     }
-  }
 
-  console.error('[API] All 5 header sets failed');
-  return [];
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error('bad JSON'); }
+    if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
+
+    const list = j.data.list.map(x => ({
+      period: String(x.issueNumber),
+      number: parseInt(x.number, 10)
+    })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
+      .sort((a, b) => BigInt(b.period) > BigInt(a.period) ? 1 : -1);
+
+    console.log(`[API] OK · ${list.length} periods`);
+    return list;
+  } catch (e) {
+    console.error('[API ERROR]', e.message);
+    return [];
+  }
 }
 
 /* ============================================================
@@ -226,8 +147,14 @@ async function processTimeframe(tf) {
   console.log(`[${tf}] period=${latestPeriod} num=${latestNumber} ctx=${context} | num=${nPred ? nPred.prediction : '-'} col=${cPred ? cPred.prediction : '-'} bs=${bPred ? bPred.prediction : '-'} | combined=${allAt100}`);
 }
 
-async function mainLoop() {
+/* ============================================================
+   30S और 1M अलग-अलग timers पर
+============================================================ */
+async function loop30S() {
   try { await processTimeframe('30s'); } catch (e) { console.error('[30s ERROR]', e.message); }
+}
+
+async function loop1M() {
   try { await processTimeframe('1m'); } catch (e) { console.error('[1m ERROR]', e.message); }
 }
 
@@ -255,8 +182,17 @@ async function start() {
   console.log('[SERVER] Starting...');
   await db.initDB();
   console.log('[SERVER] DB ready');
-  await mainLoop();
-  setInterval(mainLoop, 30 * 1000);
+
+  /* 30S — हर 30 सेकंड */
+  await loop30S();
+  setInterval(loop30S, 30 * 1000);
+  console.log('[SERVER] 30S loop started (30s interval)');
+
+  /* 1M — हर 60 सेकंड */
+  await loop1M();
+  setInterval(loop1M, 60 * 1000);
+  console.log('[SERVER] 1M loop started (60s interval)');
+
   app.listen(PORT, () => { console.log(`[SERVER] Listening on port ${PORT}`); });
 }
 
