@@ -1,15 +1,18 @@
 /* ============================================================
    WINGO GENIUS SERVER
-   node-libcurl-impersonate-ja3 के साथ
+   FlareSolverr के साथ — Cloudflare bypass
 ============================================================ */
 
 const express = require('express');
-const { Curl, impersonate, Browser } = require('node-libcurl-impersonate-ja3');
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const db = require('./database');
 const eng = require('./engines');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+/* FlareSolverr का URL — Render पर deploy करने के बाद यहाँ डालें */
+const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'http://localhost:8191';
 
 const API_30S = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 const API_1M = 'https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json';
@@ -19,32 +22,39 @@ const state = {
   '1m':  { number: { patterns: [], history: [], status: null }, colour: { patterns: [], history: [], status: null }, bigsmall: { patterns: [], history: [], status: null }, lastPeriod: null, combined: false, combinedPrev: null }
 };
 
+/* ============================================================
+   Fetch API data — FlareSolverr के through
+============================================================ */
 async function fetchAPI(apiUrl) {
   const targetUrl = apiUrl + '?ts=' + Date.now();
 
   try {
-    const curl = Curl.impersonate(Browser.Chrome);
-    curl.setOpt('URL', targetUrl);
-    curl.setOpt('FOLLOWLOCATION', true);
-    curl.setOpt('TIMEOUT', 30);
-    curl.setOpt('HTTPHEADER', [
-      'Accept: application/json, text/plain, */*',
-      'Accept-Language: en-IN,en-US;q=0.9,en;q=0.8',
-      'Referer: https://draw.ar-lottery01.com/'
-    ]);
+    const body = {
+      cmd: 'request.get',
+      url: targetUrl,
+      maxTimeout: 60000
+    };
 
-    const result = await new Promise((resolve, reject) => {
-      curl.on('end', (statusCode, data) => resolve({ statusCode, data }));
-      curl.on('error', reject);
-      curl.perform();
+    const r = await fetch(`${FLARESOLVERR_URL}/v1`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
     });
 
-    if (result.statusCode !== 200) throw new Error('HTTP ' + result.statusCode);
+    if (!r.ok) throw new Error('FlareSolverr HTTP ' + r.status);
 
-    const j = JSON.parse(result.data.toString());
-    if (!j || !j.data || !j.data.list) throw new Error('wrong shape');
+    const j = await r.json();
+    if (j.status !== 'ok' || !j.solution) {
+      throw new Error('FlareSolverr error: ' + (j.message || 'unknown'));
+    }
 
-    const list = j.data.list.map(x => ({
+    const responseText = j.solution.response;
+    let data;
+    try { data = JSON.parse(responseText); } catch (e) { throw new Error('bad JSON from FlareSolverr'); }
+
+    if (!data || !data.data || !data.data.list) throw new Error('wrong shape');
+
+    const list = data.data.list.map(x => ({
       period: String(x.issueNumber),
       number: parseInt(x.number, 10)
     })).filter(x => Number.isInteger(x.number) && x.number >= 0 && x.number <= 9)
@@ -58,6 +68,9 @@ async function fetchAPI(apiUrl) {
   }
 }
 
+/* ============================================================
+   Process one timeframe
+============================================================ */
 async function processTimeframe(tf) {
   const apiUrl = tf === '30s' ? API_30S : API_1M;
   const list = await fetchAPI(apiUrl);
