@@ -1,6 +1,6 @@
 /* ============================================================
    WINGO GENIUS SERVER
-   ScraperAPI के साथ — IP block bypass test
+   ScraperAPI + CORS
 ============================================================ */
 
 const express = require('express');
@@ -11,7 +11,15 @@ const eng = require('./engines');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ScraperAPI key */
+/* CORS — dashboard को data देने के लिए */
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
 const SCRAPERAPI_KEY = process.env.SCRAPERAPI_KEY || '48a41579427a541a33283973894cef24';
 
 const API_30S = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
@@ -22,22 +30,13 @@ const state = {
   '1m':  { number: { patterns: [], history: [], status: null }, colour: { patterns: [], history: [], status: null }, bigsmall: { patterns: [], history: [], status: null }, lastPeriod: null, combined: false, combinedPrev: null }
 };
 
-/* ============================================================
-   Fetch API via ScraperAPI
-============================================================ */
 async function fetchAPI(apiUrl) {
   const targetUrl = apiUrl + '?ts=' + Date.now();
   const scraperUrl = 'https://api.scraperapi.com/?api_key=' + SCRAPERAPI_KEY + '&url=' + encodeURIComponent(targetUrl);
 
   try {
-    const r = await fetch(scraperUrl, {
-      method: 'GET',
-      cache: 'no-store'
-    });
-
-    if (r.status !== 200) {
-      throw new Error('ScraperAPI HTTP ' + r.status);
-    }
+    const r = await fetch(scraperUrl, { method: 'GET', cache: 'no-store' });
+    if (r.status !== 200) throw new Error('ScraperAPI HTTP ' + r.status);
 
     const text = await r.text();
     let j;
@@ -58,9 +57,6 @@ async function fetchAPI(apiUrl) {
   }
 }
 
-/* ============================================================
-   Process one timeframe
-============================================================ */
 async function processTimeframe(tf) {
   const apiUrl = tf === '30s' ? API_30S : API_1M;
   const list = await fetchAPI(apiUrl);
@@ -125,6 +121,7 @@ async function processTimeframe(tf) {
   const prevCombined = state[tf].combined;
   state[tf].combined = allAt100;
   await db.updateCombinedState(tf, allAt100);
+
   if (allAt100 && !prevCombined) console.log(`[${tf}] COMBINED ACTIVE`);
   else if (!allAt100 && prevCombined) console.log(`[${tf}] COMBINED OFF`);
 
@@ -147,9 +144,6 @@ async function processTimeframe(tf) {
   console.log(`[${tf}] period=${latestPeriod} num=${latestNumber} ctx=${context} | num=${nPred ? nPred.prediction : '-'} col=${cPred ? cPred.prediction : '-'} bs=${bPred ? bPred.prediction : '-'} | combined=${allAt100}`);
 }
 
-/* ============================================================
-   30S और 1M अलग-अलग timers पर
-============================================================ */
 async function loop30S() {
   try { await processTimeframe('30s'); } catch (e) { console.error('[30s ERROR]', e.message); }
 }
@@ -158,7 +152,9 @@ async function loop1M() {
   try { await processTimeframe('1m'); } catch (e) { console.error('[1m ERROR]', e.message); }
 }
 
-app.get('/', (req, res) => { res.json({ name: 'WinGo Genius AI Server', status: 'running', uptime: process.uptime(), time: new Date().toISOString() }); });
+app.get('/', (req, res) => {
+  res.json({ name: 'WinGo Genius AI Server', status: 'running', uptime: process.uptime(), time: new Date().toISOString() });
+});
 
 app.get('/api/status', async (req, res) => {
   try {
@@ -169,10 +165,24 @@ app.get('/api/status', async (req, res) => {
         const key = `${tf}_${et}`;
         const status = await db.getEngineStatus(key) || {};
         const recentPreds = await db.getRecentPredictions(key, 20);
-        result[tf][et] = { streak: status.streak || 0, wins: status.wins || 0, losses: status.losses || 0, rounds: status.rounds || 0, accuracy: (status.wins + status.losses) > 0 ? Math.round(status.wins / (status.wins + status.losses) * 100) : 0, last_prediction: status.last_prediction, last_confidence: status.last_confidence, last_period: status.last_period, recent: recentPreds.map(p => ({ period: p.period, prediction: p.prediction, actual: p.actual, status: p.status, confidence: p.confidence })) };
+        result[tf][et] = {
+          streak: status.streak || 0,
+          wins: status.wins || 0,
+          losses: status.losses || 0,
+          rounds: status.rounds || 0,
+          accuracy: (status.wins + status.losses) > 0 ? Math.round(status.wins / (status.wins + status.losses) * 100) : 0,
+          last_prediction: status.last_prediction,
+          last_confidence: status.last_confidence,
+          last_period: status.last_period,
+          recent: recentPreds.map(p => ({ period: p.period, prediction: p.prediction, actual: p.actual, status: p.status, confidence: p.confidence }))
+        };
       }
       const cs = await db.getCombinedState(tf) || {};
-      result[tf].combined = { active: cs.active || false, jackpots: cs.jackpot_count || 0, recentJackpots: (await db.getRecentJackpots(tf, 10)).map(j => ({ period: j.period, number: j.actual_number, bigsmall: j.bigsmall_pred, colour: j.colour_pred, number_pred: j.number_pred })) };
+      result[tf].combined = {
+        active: cs.active || false,
+        jackpots: cs.jackpot_count || 0,
+        recentJackpots: (await db.getRecentJackpots(tf, 10)).map(j => ({ period: j.period, number: j.actual_number, bigsmall: j.bigsmall_pred, colour: j.colour_pred, number_pred: j.number_pred }))
+      };
     }
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -183,12 +193,10 @@ async function start() {
   await db.initDB();
   console.log('[SERVER] DB ready');
 
-  /* 30S — हर 30 सेकंड */
   await loop30S();
   setInterval(loop30S, 30 * 1000);
   console.log('[SERVER] 30S loop started (30s interval)');
 
-  /* 1M — हर 60 सेकंड */
   await loop1M();
   setInterval(loop1M, 60 * 1000);
   console.log('[SERVER] 1M loop started (60s interval)');
