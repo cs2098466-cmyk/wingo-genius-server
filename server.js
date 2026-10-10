@@ -13,15 +13,14 @@ const PORT = process.env.PORT || 3000;
 /* ---------- CORS & JSON Middleware ---------- */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  // POST और OPTIONS जोड़े गए हैं
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
-// APK से बड़ा डेटा आ सकता है, इसलिए limit बढ़ाई गई है
-app.use(express.json({ limit: '10mb' }));
+// APK से बड़ा डेटा आ सकता है, इसलिए limit 50mb कर दी है
+app.use(express.json({ limit: '50mb' }));
 
 /* ---------- Constants ---------- */
 const TRAINING_ROUNDS = 100;
@@ -244,20 +243,21 @@ app.post('/api/ingest', async (req, res) => {
     const { timeframe, raw } = req.body;
 
     if (!timeframe || !raw) {
+      console.log('[REJECTED] Missing timeframe or raw. Body:', JSON.stringify(req.body).substring(0, 200));
       return res.status(400).json({ error: 'missing timeframe or raw' });
     }
 
-    // चेक करें कि timeframe सही है या नहीं
     if (!['30s', '1m', '3m', '5m'].includes(timeframe)) {
+      console.log('[REJECTED] Invalid timeframe:', timeframe);
       return res.status(400).json({ error: 'invalid timeframe' });
     }
 
     const j = raw;
     if (!j || !j.data || !j.data.list) {
+      console.log('[REJECTED] Bad shape. Raw keys:', Object.keys(raw));
       return res.status(400).json({ error: 'bad shape: raw.data.list not found' });
     }
 
-    // डेटा को process करने लायक format में बदलें
     const list = j.data.list.map(x => ({
       period: String(x.issueNumber),
       number: parseInt(x.number, 10)
@@ -271,7 +271,6 @@ app.post('/api/ingest', async (req, res) => {
 
     if (!list.length) return res.json({ ok: true, processed: 0 });
 
-    // मुख्य प्रोसेसिंग फंक्शन को कॉल करें
     const processed = await ingestList(timeframe, list);
 
     console.log(`[INGEST SUCCESS] ${timeframe} · ${list.length} periods · ${list[0].period}`);
@@ -335,9 +334,6 @@ async function start() {
   console.log('[SERVER] Starting...');
   await db.initDB();
   console.log('[SERVER] DB ready');
-
-  // पुराने loops और setInterval हटा दिए गए हैं
-  // अब सर्वर सिर्फ APK से डेटा आने का इंतज़ार करेगा
 
   app.listen(PORT, () => console.log(`[SERVER] Listening on port ${PORT}`));
 }
