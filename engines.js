@@ -1,7 +1,6 @@
 /* ============================================================
    ENGINES — हर engine का pattern logic
-   30S और 1M बिल्कुल अलग
-   हर engine का data अलग
+   (Updated: No strict thresholds, always predicts best guess)
 ============================================================ */
 
 /* size निकालो */
@@ -81,18 +80,19 @@ function learnPatterns(engine, numbers, existingPatterns) {
 }
 
 /* ============================================================
-   Prediction
+   Prediction (Ab hamesha best guess dega)
 ============================================================ */
 function predictSize(currentContext, patterns) {
   const p = patterns.find(x => x.context === currentContext);
   if (!p || p.sleeping) return null;
   const total = p.big_count + p.small_count;
   if (total < 3) return null;
-  const bigPct = p.big_count / total;
-  const smallPct = p.small_count / total;
-  if (bigPct >= 0.65) return { prediction: 'BIG', confidence: Math.round(bigPct * 100) };
-  if (smallPct >= 0.65) return { prediction: 'SMALL', confidence: Math.round(smallPct * 100) };
-  return null;
+
+  if (p.big_count >= p.small_count) {
+    return { prediction: 'BIG', confidence: Math.round((p.big_count / total) * 100) };
+  } else {
+    return { prediction: 'SMALL', confidence: Math.round((p.small_count / total) * 100) };
+  }
 }
 
 function predictColour(currentContext, patterns) {
@@ -100,11 +100,14 @@ function predictColour(currentContext, patterns) {
   if (!p || p.sleeping) return null;
   const total = p.red_count + p.green_count + p.violet_count;
   if (total < 3) return null;
-  const r = p.red_count / total;
-  const g = p.green_count / total;
-  if (r >= 0.65) return { prediction: 'RED', confidence: Math.round(r * 100) };
-  if (g >= 0.65) return { prediction: 'GREEN', confidence: Math.round(g * 100) };
-  return null;
+
+  if (p.red_count >= p.green_count && p.red_count >= p.violet_count) {
+    return { prediction: 'RED', confidence: Math.round((p.red_count / total) * 100) };
+  } else if (p.green_count >= p.red_count && p.green_count >= p.violet_count) {
+    return { prediction: 'GREEN', confidence: Math.round((p.green_count / total) * 100) };
+  } else {
+    return { prediction: 'VIOLET', confidence: Math.round((p.violet_count / total) * 100) };
+  }
 }
 
 function predictNumber(currentContext, patterns) {
@@ -112,13 +115,14 @@ function predictNumber(currentContext, patterns) {
   if (!p || p.sleeping) return null;
   const total = Object.values(p.numbers).reduce((a, b) => a + b, 0);
   if (total < 3) return null;
+
   let bestNum = null, bestCount = 0;
   for (const [num, count] of Object.entries(p.numbers)) {
     if (count > bestCount) { bestCount = count; bestNum = parseInt(num); }
   }
+  // 40% ki shart hata di hai
   const pct = bestCount / total;
-  if (pct >= 0.40) return { prediction: String(bestNum), confidence: Math.round(pct * 100) };
-  return null;
+  return { prediction: String(bestNum), confidence: Math.round(pct * 100) };
 }
 
 /* ============================================================
@@ -132,10 +136,7 @@ function updatePatternWeights(patterns, context, actualNum) {
     const total = p.big_count + p.small_count;
     if (total === 0) return;
 
-    let maxCount = 0;
-    if (p.big_count > p.small_count) maxCount = p.big_count;
-    else maxCount = p.small_count;
-    const predictedSize = p.big_count > p.small_count ? 'BIG' : 'SMALL';
+    let predictedSize = p.big_count > p.small_count ? 'BIG' : 'SMALL';
 
     if (predictedSize === actualSize) {
       p.hits = (p.hits || 0) + 1;
@@ -145,7 +146,6 @@ function updatePatternWeights(patterns, context, actualNum) {
       p.weight = Math.max(10, (p.weight || 100) - 8);
     }
 
-    /* Pattern कभी मरता नहीं, बस सो जाता है */
     const tot = p.hits + p.misses;
     if (tot >= 20) {
       const acc = p.hits / tot;

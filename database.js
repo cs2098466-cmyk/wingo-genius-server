@@ -1,6 +1,6 @@
 /* ============================================================
    DATABASE — PostgreSQL
-   हर engine का data अलग save होगा
+   हर engine का data अलग save होगा (Updated for 4 timeframes)
 ============================================================ */
 
 const { Pool } = require('pg');
@@ -14,7 +14,7 @@ const pool = new Pool({
 async function initDB() {
   const client = await pool.connect();
   try {
-    /* Patterns table — हर pattern हमेशा ज़िंदा */
+    /* Patterns table */
     await client.query(`
       CREATE TABLE IF NOT EXISTS patterns (
         id SERIAL PRIMARY KEY,
@@ -92,10 +92,12 @@ async function initDB() {
       )
     `);
 
-    /* Initialize engine status rows if missing */
+    /* 🟢 अब चारों timeframes के लिए rows बनाएँ */
     const engines = [
       '30s_number', '30s_colour', '30s_bigsmall',
-      '1m_number', '1m_colour', '1m_bigsmall'
+      '1m_number', '1m_colour', '1m_bigsmall',
+      '3m_number', '3m_colour', '3m_bigsmall',
+      '5m_number', '5m_colour', '5m_bigsmall'
     ];
     for (const e of engines) {
       await client.query(
@@ -104,7 +106,8 @@ async function initDB() {
         [e, Date.now()]
       );
     }
-    const timeframes = ['30s', '1m'];
+    
+    const timeframes = ['30s', '1m', '3m', '5m'];
     for (const tf of timeframes) {
       await client.query(
         `INSERT INTO combined_state (timeframe, last_check) VALUES ($1, $2)
@@ -113,7 +116,7 @@ async function initDB() {
       );
     }
 
-    console.log('[DB] Tables ready');
+    console.log('[DB] Tables ready for all 4 timeframes');
   } finally {
     client.release();
   }
