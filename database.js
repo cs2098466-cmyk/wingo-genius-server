@@ -1,6 +1,5 @@
 /* ============================================================
-   DATABASE — PostgreSQL
-   हर engine का data अलग save होगा (Updated for 4 timeframes)
+   DATABASE — PostgreSQL (Ensemble Learning Enabled)
 ============================================================ */
 
 const { Pool } = require('pg');
@@ -14,7 +13,6 @@ const pool = new Pool({
 async function initDB() {
   const client = await pool.connect();
   try {
-    /* Patterns table */
     await client.query(`
       CREATE TABLE IF NOT EXISTS patterns (
         id SERIAL PRIMARY KEY,
@@ -36,7 +34,6 @@ async function initDB() {
       )
     `);
 
-    /* Engine status table */
     await client.query(`
       CREATE TABLE IF NOT EXISTS engine_status (
         id SERIAL PRIMARY KEY,
@@ -52,7 +49,6 @@ async function initDB() {
       )
     `);
 
-    /* Prediction history */
     await client.query(`
       CREATE TABLE IF NOT EXISTS predictions (
         id SERIAL PRIMARY KEY,
@@ -67,7 +63,6 @@ async function initDB() {
       )
     `);
 
-    /* JACKPOT history */
     await client.query(`
       CREATE TABLE IF NOT EXISTS jackpots (
         id SERIAL PRIMARY KEY,
@@ -81,7 +76,6 @@ async function initDB() {
       )
     `);
 
-    /* Combined state */
     await client.query(`
       CREATE TABLE IF NOT EXISTS combined_state (
         id SERIAL PRIMARY KEY,
@@ -92,7 +86,39 @@ async function initDB() {
       )
     `);
 
-    /* 🟢 अब चारों timeframes के लिए rows बनाएँ */
+    /* ============ ENSEMBLE TABLES ============ */
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS prediction_sources (
+        id SERIAL PRIMARY KEY,
+        timeframe VARCHAR(10) NOT NULL,
+        engine VARCHAR(20) NOT NULL,
+        period VARCHAR(50) NOT NULL,
+        source VARCHAR(10) NOT NULL,
+        prediction VARCHAR(20) NOT NULL,
+        confidence INTEGER DEFAULT 0,
+        method VARCHAR(40),
+        actual VARCHAR(20),
+        status VARCHAR(20) DEFAULT 'PENDING',
+        created_at BIGINT DEFAULT 0,
+        UNIQUE(timeframe, engine, period, source)
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS source_accuracy (
+        id SERIAL PRIMARY KEY,
+        timeframe VARCHAR(10) NOT NULL,
+        engine VARCHAR(20) NOT NULL,
+        source VARCHAR(10) NOT NULL,
+        wins INTEGER DEFAULT 0,
+        losses INTEGER DEFAULT 0,
+        accuracy REAL DEFAULT 0.0,
+        updated_at BIGINT DEFAULT 0,
+        UNIQUE(timeframe, engine, source)
+      )
+    `);
+
+    /* Engine status rows for all 4 timeframes */
     const engines = [
       '30s_number', '30s_colour', '30s_bigsmall',
       '1m_number', '1m_colour', '1m_bigsmall',
@@ -116,13 +142,13 @@ async function initDB() {
       );
     }
 
-    console.log('[DB] Tables ready for all 4 timeframes');
+    console.log('[DB] Tables ready (with Ensemble)');
   } finally {
     client.release();
   }
 }
 
-/* Pattern save/load */
+/* ---------- Patterns ---------- */
 async function upsertPattern(engine, context, data) {
   const client = await pool.connect();
   try {
@@ -163,7 +189,7 @@ async function loadAllPatterns(engine) {
   }
 }
 
-/* Engine status */
+/* ---------- Engine status ---------- */
 async function getEngineStatus(engine) {
   const client = await pool.connect();
   try {
@@ -197,8 +223,8 @@ async function updateEngineStatus(engine, data) {
   }
 }
 
-/* Predictions */
-async function savePrediction(engine, period, prediction, confidence) {
+/* ---------- Predictions (server-side) ---------- */
+async function savePrediction(engine, period, prediction, confidence, method) {
   const client = await pool.connect();
   try {
     await client.query(`
@@ -234,21 +260,133 @@ async function resolvePrediction(engine, period, actual) {
   }
 }
 
-async function getRecentPredictions(engine, limit = 30) {
+/* ============ ENSEMBLE FUNCTIONS ============ */
+
+/* Save a prediction from a source (local/server) */
+async function savePredictionSource(tf, engine, period, source, pred, conf, method) {
   const client = await pool.connect();
   try {
-    const r = await client.query(
-      `SELECT * FROM predictions WHERE engine = $1
-       ORDER BY created_at DESC LIMIT $2`,
-      [engine, limit]
-    );
+    await client.query(`
+      INSERT INTO prediction_sources 
+        (timeframe, engine, period, source, prediction, confidence, method, status, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8)
+      ON CONFLICT (timeframe, engine, period, source) DO UPDATE SET
+        prediction = $5, confidence = $6, method = $7
+    `, [tf, engine, period, source, pred, conf, method || '', Date.now()]);
+  } finally {
+    client.release();
+  }
+}
+
+/* Resolve all pending predictions for a given period across sources */
+async function resolvePredictionSources(tf, engine, period, actual) {
+  const client = await pool.connect();
+  try {
+    const r = await client.query(`
+      SELECT * FROM prediction_sources 
+      WHERE timeframe = $1 AND engine = $2 AND period = $3 AND actual IS NULL
+    `, [tf, engine, period]);
+    
+    for (const row of r.rows) {
+      const win = (row.prediction === actual);
+      await client.query(`
+        UPDATE prediction_sources SET actual = $1, status = $2 WHERE id = $3
+      `, [actual, win ? 'WIN' : 'LOSS', row.id]);
+      
+      // update accuracy
+      await updateSourceAccuracy(tf, engine, row.source, win);
+    }
+    return r.rows.length;
+  } finally {
+    client.release();
+  }
+}
+
+/* Update win/loss accuracy for a source */
+async function updateSourceAccuracy(tf, engine, source, win) {
+  const client = await pool.connect();
+  try {
+    const r = await client.query(`
+      SELECT * FROM source_accuracy WHERE timeframe = $1 AND engine = $2 AND source = $3
+    `, [tf, engine, source]);
+    
+    if (r.rows.length === 0) {
+      await client.query(`
+        INSERT INTO source_accuracy (timeframe, engine, source, wins, losses, accuracy, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [tf, engine, source, win ? 1 : 0, win ? 0 : 1, win ? 100 : 0, Date.now()]);
+    } else {
+      const row = r.rows[0];
+      const wins = row.wins + (win ? 1 : 0);
+      const losses = row.losses + (win ? 0 : 1);
+      const acc = wins / (wins + losses) * 100;
+      await client.query(`
+        UPDATE source_accuracy SET wins = $1, losses = $2, accuracy = $3, updated_at = $4 WHERE id = $5
+      `, [wins, losses, acc, Date.now(), row.id]);
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/* Get accuracy for a source */
+async function getSourceAccuracy(tf, engine, source) {
+  const client = await pool.connect();
+  try {
+    const r = await client.query(`
+      SELECT * FROM source_accuracy WHERE timeframe = $1 AND engine = $2 AND source = $3
+    `, [tf, engine, source]);
+    return r.rows[0] || { wins: 0, losses: 0, accuracy: 0 };
+  } finally {
+    client.release();
+  }
+}
+
+/* Get all source accuracies for a timeframe */
+async function getAllSourceAccuracies(tf) {
+  const client = await pool.connect();
+  try {
+    const r = await client.query(`
+      SELECT * FROM source_accuracy WHERE timeframe = $1
+    `, [tf]);
     return r.rows;
   } finally {
     client.release();
   }
 }
 
-/* Combined state */
+/* Get latest pending prediction from a source */
+async function getLatestPendingPrediction(tf, engine, source) {
+  const client = await pool.connect();
+  try {
+    const r = await client.query(`
+      SELECT * FROM prediction_sources 
+      WHERE timeframe = $1 AND engine = $2 AND source = $3 
+        AND status = 'PENDING'
+      ORDER BY created_at DESC LIMIT 1
+    `, [tf, engine, source]);
+    return r.rows[0] || null;
+  } finally {
+    client.release();
+  }
+}
+
+/* Get recent source history (last N) */
+async function getSourceHistory(tf, engine, source, limit = 30) {
+  const client = await pool.connect();
+  try {
+    const r = await client.query(`
+      SELECT * FROM prediction_sources 
+      WHERE timeframe = $1 AND engine = $2 AND source = $3 
+      ORDER BY created_at DESC LIMIT $4
+    `, [tf, engine, source, limit]);
+    return r.rows;
+  } finally {
+    client.release();
+  }
+}
+
+/* ---------- Combined state ---------- */
 async function getCombinedState(timeframe) {
   const client = await pool.connect();
   try {
@@ -286,31 +424,6 @@ async function incrementJackpot(timeframe) {
   }
 }
 
-async function saveJackpot(timeframe, period, bs, col, num, actual) {
-  const client = await pool.connect();
-  try {
-    await client.query(`
-      INSERT INTO jackpots (timeframe, period, bigsmall_pred, colour_pred, number_pred, actual_number, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-    `, [timeframe, period, bs, col, num, actual, Date.now()]);
-  } finally {
-    client.release();
-  }
-}
-
-async function getRecentJackpots(timeframe, limit = 20) {
-  const client = await pool.connect();
-  try {
-    const r = await client.query(
-      `SELECT * FROM jackpots WHERE timeframe = $1 ORDER BY created_at DESC LIMIT $2`,
-      [timeframe, limit]
-    );
-    return r.rows;
-  } finally {
-    client.release();
-  }
-}
-
 module.exports = {
   pool,
   initDB,
@@ -320,10 +433,15 @@ module.exports = {
   updateEngineStatus,
   savePrediction,
   resolvePrediction,
-  getRecentPredictions,
   getCombinedState,
   updateCombinedState,
   incrementJackpot,
-  saveJackpot,
-  getRecentJackpots
+  // Ensemble
+  savePredictionSource,
+  resolvePredictionSources,
+  updateSourceAccuracy,
+  getSourceAccuracy,
+  getAllSourceAccuracies,
+  getLatestPendingPrediction,
+  getSourceHistory
 };
