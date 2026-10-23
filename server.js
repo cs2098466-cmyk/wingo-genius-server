@@ -1,5 +1,5 @@
 /* ============================================================
-   WINGO GENIUS SERVER (10-Expert Ensemble + Fast Boot + Fixed)
+   WINGO GENIUS SERVER (10-Expert Ensemble + Fast Boot + W/L Fix)
 ============================================================ */
 
 const express = require('express');
@@ -18,7 +18,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// 🟢 Request Logger (इससे आपको Render लॉग्स में दिखेगा कि UptimeRobot सर्वर को जगा रहा है)
+// 🟢 Request Logger (UptimeRobot और Cron-job के लिए)
 app.use((req, res, next) => {
   if (req.url !== '/favicon.ico') {
     console.log(`[PING] ${req.method} ${req.url} - ${new Date().toLocaleTimeString()}`);
@@ -134,11 +134,12 @@ async function ingestList(tf, list, localPred) {
   return list.length;
 }
 
-// 🟢 सबसे ज़रूरी राउट (UptimeRobot इसे हिट करता है) 🟢
+// 🟢 होम राउट (UptimeRobot के लिए) 🟢
 app.get('/', (req, res) => {
   res.json({ name: 'WinGo Genius AI Server', status: 'running', uptime: process.uptime(), time: Date.now() });
 });
 
+// 🟢 डेटा इनजेस्ट राउट 🟢
 app.post('/api/ingest', async (req, res) => {
   try {
     const { timeframe, raw, localPred } = req.body;
@@ -158,6 +159,7 @@ app.post('/api/ingest', async (req, res) => {
   }
 });
 
+// 🟢 कंबाइंड डेटा (W/L काउंटर के साथ) 🟢
 app.get('/api/combined/:timeframe', async (req, res) => {
   const tf = req.params.timeframe;
   try {
@@ -176,18 +178,27 @@ app.get('/api/combined/:timeframe', async (req, res) => {
       } else if (localPred) combined = { pred: localPred.prediction, conf: localPred.confidence || 0, source: 'local' };
       else if (serverPred) combined = { pred: serverPred.prediction, conf: serverPred.confidence || 0, source: 'server' };
 
-      result[engine] = { combined, local: localPred, server: serverPred };
+      // 🟢 यहाँ wins और losses भेजे जा रहे हैं डैशबोर्ड के लिए 🟢
+      result[engine] = { 
+        combined, 
+        local: localPred ? { ...localPred, wins: localAcc.wins || 0, losses: localAcc.losses || 0 } : null, 
+        server: serverPred ? { ...serverPred, wins: serverAcc.wins || 0, losses: serverAcc.losses || 0 } : null 
+      };
     }
     res.json({ [tf]: result });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// 🟢 200 हिस्ट्री फेच करने का राउट 🟢
 app.get('/api/sources/:timeframe', async (req, res) => {
   const tf = req.params.timeframe;
   try {
     const out = {};
     for (const engine of ['number', 'size', 'colour']) {
-      out[engine] = { local: await db.getSourceHistory(tf, engine, 'local', 20), server: await db.getSourceHistory(tf, engine, 'server', 20) };
+      out[engine] = { 
+        local: await db.getSourceHistory(tf, engine, 'local', 200), 
+        server: await db.getSourceHistory(tf, engine, 'server', 200) 
+      };
     }
     res.json({ [tf]: out });
   } catch (e) { res.status(500).json({ error: e.message }); }
