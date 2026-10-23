@@ -1,5 +1,5 @@
 /* ============================================================
-   WINGO GENIUS SERVER (10-Expert Ensemble + Fast Boot + W/L Fix)
+   WINGO GENIUS SERVER (10-Expert Ensemble + Fast Boot + Clean Reset)
 ============================================================ */
 
 const express = require('express');
@@ -18,7 +18,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// 🟢 Request Logger (UptimeRobot और Cron-job के लिए)
+// 🟢 Request Logger
 app.use((req, res, next) => {
   if (req.url !== '/favicon.ico') {
     console.log(`[PING] ${req.method} ${req.url} - ${new Date().toLocaleTimeString()}`);
@@ -38,7 +38,8 @@ function createTimeframeState() {
   return { number: blankEngine(), colour: blankEngine(), bigsmall: blankEngine(), combined: { status: 'WAITING', jackpots: 0, history: [] }, lastPeriod: null, apiHistory: [] };
 }
 
-const state = { '30s': createTimeframeState(), '1m': createTimeframeState(), '3m': createTimeframeState(), '5m': createTimeframeState() };
+// ग्लोबल स्टेट
+let state = { '30s': createTimeframeState(), '1m': createTimeframeState(), '3m': createTimeframeState(), '5m': createTimeframeState() };
 
 function actualFor(engineType, number) {
   if (engineType === 'number') return String(number);
@@ -134,12 +135,43 @@ async function ingestList(tf, list, localPred) {
   return list.length;
 }
 
-// 🟢 होम राउट (UptimeRobot के लिए) 🟢
+// 🟢 होम राउट
 app.get('/', (req, res) => {
   res.json({ name: 'WinGo Genius AI Server', status: 'running', uptime: process.uptime(), time: Date.now() });
 });
 
-// 🟢 डेटा इनजेस्ट राउट 🟢
+// 🚨 सब कुछ जीरो करने वाला "Nuke" राउट 🚨
+app.get('/api/clean-all', async (req, res) => {
+  try {
+    const client = await db.pool.connect();
+    console.log('[NUKE] Dropping all tables...');
+    
+    // सारे टेबल्स को पूरी तरह से डिलीट (Drop) करना
+    await client.query(`
+      DROP TABLE IF EXISTS patterns CASCADE;
+      DROP TABLE IF EXISTS engine_status CASCADE;
+      DROP TABLE IF EXISTS predictions CASCADE;
+      DROP TABLE IF EXISTS prediction_sources CASCADE;
+      DROP TABLE IF EXISTS source_accuracy CASCADE;
+      DROP TABLE IF EXISTS combined_state CASCADE;
+    `);
+    client.release();
+
+    console.log('[NUKE] Tables dropped. Re-initializing...');
+    // डेटाबेस को वापस नए और खाली टेबल्स के साथ चालू करना
+    await db.initDB();
+
+    // इन-मेमोरी (RAM) वाले डेटा को भी रीसेट करना
+    state = { '30s': createTimeframeState(), '1m': createTimeframeState(), '3m': createTimeframeState(), '5m': createTimeframeState() };
+
+    console.log('[NUKE] Server is completely clean! 0 History, 0 W/L.');
+    res.json({ ok: true, message: '🧨 BOOM! Everything is completely wiped. 0 W/L, 0 History. All tables re-created.' });
+  } catch (e) {
+    console.error('[NUKE ERROR]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/ingest', async (req, res) => {
   try {
     const { timeframe, raw, localPred } = req.body;
@@ -159,7 +191,6 @@ app.post('/api/ingest', async (req, res) => {
   }
 });
 
-// 🟢 कंबाइंड डेटा (W/L काउंटर के साथ) 🟢
 app.get('/api/combined/:timeframe', async (req, res) => {
   const tf = req.params.timeframe;
   try {
@@ -178,7 +209,6 @@ app.get('/api/combined/:timeframe', async (req, res) => {
       } else if (localPred) combined = { pred: localPred.prediction, conf: localPred.confidence || 0, source: 'local' };
       else if (serverPred) combined = { pred: serverPred.prediction, conf: serverPred.confidence || 0, source: 'server' };
 
-      // 🟢 यहाँ wins और losses भेजे जा रहे हैं डैशबोर्ड के लिए 🟢
       result[engine] = { 
         combined, 
         local: localPred ? { ...localPred, wins: localAcc.wins || 0, losses: localAcc.losses || 0 } : null, 
@@ -189,7 +219,6 @@ app.get('/api/combined/:timeframe', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 🟢 200 हिस्ट्री फेच करने का राउट 🟢
 app.get('/api/sources/:timeframe', async (req, res) => {
   const tf = req.params.timeframe;
   try {
@@ -213,7 +242,6 @@ app.get('/api/status', (req, res) => {
   res.json(result);
 });
 
-// 🟢 सर्वर को तुरंत चालू करें (Fast Boot) 🟢
 app.listen(PORT, () => {
   console.log(`[SERVER] Listening on port ${PORT} (Fast Boot)`);
 });
