@@ -83,7 +83,6 @@ async function initDB() {
   }
 }
 
-// 🟢 यह फंक्शन पुराने डेटा को डिलीट करके स्पेस बचाएगा 🟢
 async function cleanOldData(days = 7) {
   const client = await pool.connect();
   try {
@@ -252,7 +251,7 @@ async function incrementJackpot(timeframe) {
 }
 
 module.exports = {
-  pool, initDB, cleanOldData, // Added CleanOldData
+  pool, initDB, cleanOldData,
   upsertPattern, loadAllPatterns, getEngineStatus, updateEngineStatus,
   savePrediction, resolvePrediction, getCombinedState, updateCombinedState, incrementJackpot,
   savePredictionSource, resolvePredictionSources, updateSourceAccuracy, getSourceAccuracy,

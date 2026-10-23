@@ -1,5 +1,5 @@
 /* ============================================================
-   WINGO GENIUS SERVER (10-Expert Ensemble + Render Optimized)
+   WINGO GENIUS SERVER (10-Expert Ensemble + Fast Boot)
 ============================================================ */
 
 const express = require('express');
@@ -17,9 +17,9 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '10mb' })); // RAM बचाने के लिए लिमिट कम की
+app.use(express.json({ limit: '10mb' }));
 
-const TRAINING_ROUNDS = 10; // जल्दी ट्रेनिंग खत्म होने के लिए
+const TRAINING_ROUNDS = 10;
 
 function blankEngine() {
   return { rounds: 0, wins: 0, losses: 0, correctCount: 0, currentStreak: 0, status: 'TRAINING', pending: null, lastPrediction: null, lastActual: null, lastResult: null, recent: [] };
@@ -98,11 +98,10 @@ async function ingestList(tf, list, localPred) {
   const chrono = list.slice(0, 50).reverse();
   const numbers = chrono.map(x => x.number);
   
-  // केवल ज़रूरी पैटर्न्स ही लर्न करें ताकि डेटाबेस न भरे
   const existingPatterns = await db.loadAllPatterns(`${tf}_number`);
   const newPatterns = eng.learnPatterns(`${tf}`, numbers, existingPatterns);
   for (const p of newPatterns) {
-    if (p.big_count + p.small_count >= 3) { // सिर्फ 3 बार से ज्यादा आए पैटर्न्स सेव करें
+    if (p.big_count + p.small_count >= 3) { 
       await db.upsertPattern(`${tf}_number`, p.context, p);
       await db.upsertPattern(`${tf}_colour`, p.context, p);
       await db.upsertPattern(`${tf}_bigsmall`, p.context, p);
@@ -188,17 +187,19 @@ app.get('/api/status', (req, res) => {
   res.json(result);
 });
 
-// 🟢 ऑटोमेटिक डेटाबेस क्लीनअप (हर 12 घंटे में) 🟢
-setInterval(async () => {
-  try {
-    await db.cleanOldData(7); // 7 दिन से पुराना डेटा डिलीट कर देगा
-  } catch(e) { console.log("Cleanup error:", e.message); }
-}, 12 * 60 * 60 * 1000);
+// 🟢 यहाँ सबसे बड़ा फिक्स है: सर्वर पहले चालू होगा, फिर DB कनेक्ट होगा 🟢
+app.listen(PORT, () => {
+  console.log(`[SERVER] Listening on port ${PORT} (Fast Boot)`);
+});
 
-async function start() {
-  console.log('[SERVER] Starting (10-Expert Ensemble)...');
-  await db.initDB();
-  app.listen(PORT, () => console.log(`[SERVER] Listening on port ${PORT}`));
-}
+db.initDB().then(() => {
+  console.log('[SERVER] Database Connected & Ready!');
+  
+  // डेटाबेस कनेक्ट होने के बाद क्लीनअप टाइमर चालू करें
+  setInterval(async () => {
+    try { await db.cleanOldData(7); } catch(e) { console.log("Cleanup error:", e.message); }
+  }, 12 * 60 * 60 * 1000);
 
-start().catch(e => { console.error('[FATAL]', e); process.exit(1); });
+}).catch(e => {
+  console.error('[FATAL DB ERROR]', e);
+});

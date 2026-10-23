@@ -112,7 +112,7 @@ function predictWithExperts(numbers) {
   let fib = [1, 1, 2, 3, 5, 8];
   votes[history[fib[fib.length - 1] % len] || last]++;
 
-  // 8. Parity (Even/Odd)
+  // 8. Parity
   let evens = numbers.slice(-5).filter(n => n % 2 === 0).length;
   votes[(evens >= 3) ? 'SMALL' : 'BIG']++;
 
