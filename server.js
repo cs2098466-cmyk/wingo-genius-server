@@ -1,5 +1,5 @@
 /* ============================================================
-   WINGO GENIUS SERVER (10-Expert Ensemble + Fast Boot)
+   WINGO GENIUS SERVER (10-Expert Ensemble + Fast Boot + Fixed)
 ============================================================ */
 
 const express = require('express');
@@ -9,11 +9,20 @@ const eng = require('./engines');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// 🟢 CORS Middleware
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
+// 🟢 Request Logger (इससे आपको Render लॉग्स में दिखेगा कि UptimeRobot सर्वर को जगा रहा है)
+app.use((req, res, next) => {
+  if (req.url !== '/favicon.ico') {
+    console.log(`[PING] ${req.method} ${req.url} - ${new Date().toLocaleTimeString()}`);
+  }
   next();
 });
 
@@ -125,6 +134,11 @@ async function ingestList(tf, list, localPred) {
   return list.length;
 }
 
+// 🟢 सबसे ज़रूरी राउट (UptimeRobot इसे हिट करता है) 🟢
+app.get('/', (req, res) => {
+  res.json({ name: 'WinGo Genius AI Server', status: 'running', uptime: process.uptime(), time: Date.now() });
+});
+
 app.post('/api/ingest', async (req, res) => {
   try {
     const { timeframe, raw, localPred } = req.body;
@@ -136,6 +150,7 @@ app.post('/api/ingest', async (req, res) => {
 
     if (!list.length) return res.json({ ok: true, processed: 0 });
     const processed = await ingestList(timeframe, list, localPred);
+    console.log(`[INGEST] ${timeframe} - Period: ${list[0].period} - Number: ${list[0].number}`);
     res.json({ ok: true, processed });
   } catch (e) {
     console.error('[INGEST ERROR]', e.message);
@@ -187,7 +202,7 @@ app.get('/api/status', (req, res) => {
   res.json(result);
 });
 
-// 🟢 यहाँ सबसे बड़ा फिक्स है: सर्वर पहले चालू होगा, फिर DB कनेक्ट होगा 🟢
+// 🟢 सर्वर को तुरंत चालू करें (Fast Boot) 🟢
 app.listen(PORT, () => {
   console.log(`[SERVER] Listening on port ${PORT} (Fast Boot)`);
 });
@@ -195,7 +210,6 @@ app.listen(PORT, () => {
 db.initDB().then(() => {
   console.log('[SERVER] Database Connected & Ready!');
   
-  // डेटाबेस कनेक्ट होने के बाद क्लीनअप टाइमर चालू करें
   setInterval(async () => {
     try { await db.cleanOldData(7); } catch(e) { console.log("Cleanup error:", e.message); }
   }, 12 * 60 * 60 * 1000);
